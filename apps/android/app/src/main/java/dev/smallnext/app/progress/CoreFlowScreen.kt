@@ -183,6 +183,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     var showingGoal by rememberSaveable { mutableStateOf(false) }
     var announcement by remember { mutableStateOf("") }
     var shown by remember { mutableStateOf(state.screen) }
+    var shownDeferred by remember { mutableStateOf(state.goal?.deferredActions.orEmpty()) }
     val screen = state.screen
     var splitGhost by remember { mutableStateOf<SplitGhost?>(null) }
     // 되돌린 원래 행동이다. 이 행동이 현재 행동인 동안 작은 행동이 보류로 간 것을 알린다.
@@ -191,7 +192,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val announce = { message: String -> announcement = if (announcement == message) "$message\u200B" else message }
     LaunchedEffect(screen) {
         if (shown != screen) {
-            announcement(shown, screen, resources)?.let(announce)
+            announcement(shown, screen, shownDeferred, state.goal?.deferredActions.orEmpty(), resources)?.let(announce)
             val old = (shown as? ProgressScreen.CurrentAction)?.card
             val new = (screen as? ProgressScreen.CurrentAction)?.card
             if (old != null && new != null && old.id != new.id) {
@@ -201,6 +202,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
             if (new?.id != undoneActionId) undoneActionId = null
         }
         shown = screen
+        shownDeferred = state.goal?.deferredActions.orEmpty()
     }
     val focusManager = LocalFocusManager.current
     var goalInputProblem by remember { mutableStateOf<String?>(null) }
@@ -286,6 +288,9 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     // 누른 카드의 ID를 넘겨 그사이 바뀐 카드에는 실행하지 않는다.
     val smaller = { currentCardId?.let { id -> cardCommand(id) { flow.makeSmaller(id) } } ?: Unit }
     val undo = { actionId: Long -> cardCommand(actionId) { flow.undoSplit(actionId) } }
+    val defer = { actionId: Long -> cardCommand(actionId) { flow.deferAction(actionId) } }
+    // 현재 행동이 있으면 그 행동이 보류로 가므로 '완료'처럼 그 카드의 초안을 먼저 저장한다.
+    val resume = { actionId: Long -> currentCardId?.let { id -> cardCommand(id) { flow.resume(actionId) } } ?: run { flow.resume(actionId) } }
     val cancel = { run(flow::cancelSuggestion) }
     Scaffold(
         bottomBar = {
@@ -346,6 +351,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                         smaller = smaller,
                         cancel = cancel,
                         undo = { undo(target.card.id) },
+                        defer = { defer(target.card.id) },
                         save = save,
                         storageFailed = storageFailed,
                         flow = flow,
@@ -359,6 +365,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                         Heading(R.string.next_action_title, MaterialTheme.typography.titleLarge)
                         SuggestionStatus(R.string.preparing_next_action, target.problem, flow, run)
                     }
+                    is ProgressScreen.OnHold -> OnHoldContent(target, flow, run, resume)
                 }
             }
             if (storageFailed && !pinned) StorageFailure()
@@ -376,6 +383,23 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                 Text(goal.statement)
                 Heading(R.string.completion_criteria, MaterialTheme.typography.titleMedium)
                 Text(goal.completionCriteria ?: stringResource(R.string.completion_criteria_missing))
+                // 재개는 현재 행동이나 보류 중 화면에서만 한다(iOS `canResumeFromGoal`).
+                if (goal.deferredActions.isNotEmpty() && (screen is ProgressScreen.CurrentAction || screen is ProgressScreen.OnHold)) {
+                    Heading(R.string.deferred_actions, MaterialTheme.typography.titleMedium)
+                    if (screen is ProgressScreen.CurrentAction) {
+                        Text(
+                            stringResource(R.string.resume_moves_current),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    for (action in goal.deferredActions) {
+                        DeferredAction(action) {
+                            showingGoal = false
+                            resume(action.id)
+                        }
+                    }
+                }
             }
         }
     }
@@ -500,6 +524,7 @@ private val ProgressScreen.key: String
         is ProgressScreen.AwaitingFirstAction -> "awaitingFirstAction-$problem"
         is ProgressScreen.CurrentAction -> "currentAction-${card.id}"
         is ProgressScreen.AwaitingNextAction -> "awaitingNextAction-$problem"
+        is ProgressScreen.OnHold -> "onHold-$status"
     }
 
 /** 큰 글꼴에서는 머리 영역을 세로로 쌓는다. */
@@ -677,6 +702,7 @@ private fun ActionCardContent(
     smaller: () -> Unit,
     cancel: () -> Unit,
     undo: () -> Unit,
+    defer: () -> Unit,
     save: (suspend () -> Unit) -> Unit,
     storageFailed: Boolean,
     flow: ProgressFlow,
@@ -702,23 +728,16 @@ private fun ActionCardContent(
         Row(verticalAlignment = Alignment.CenterVertically) {
             // 큰 글꼴에서도 '더 보기'가 48dp를 지키도록 남는 폭은 제목이 줄바꿈해 쓴다.
             Heading(R.string.current_action_title, MaterialTheme.typography.titleLarge, Modifier.weight(1f))
-            // 보조 메뉴다. '나중에'는 #354에서 더한다. 지금은 되돌릴 분할 원본이 있을 때만 보인다.
-            if (card.origin != null) {
-                var menuOpen by remember { mutableStateOf(false) }
-                val more = stringResource(R.string.more)
-                Box {
-                    TextButton({ menuOpen = true }, Modifier.size(48.dp).semantics { contentDescription = more }) {
-                        Text("⋯", Modifier.clearAndSetSemantics {}, style = MaterialTheme.typography.titleLarge)
-                    }
-                    DropdownMenu(menuOpen, { menuOpen = false }) {
-                        DropdownMenuItem(
-                            { Text(stringResource(R.string.undo_split)) },
-                            {
-                                menuOpen = false
-                                undo()
-                            },
-                            Modifier.heightIn(min = 48.dp),
-                        )
+            // 보조 메뉴다. '되돌리기'는 되돌릴 분할 원본이 있을 때만 보인다.
+            var menuOpen by remember { mutableStateOf(false) }
+            val more = stringResource(R.string.more)
+            Box {
+                TextButton({ menuOpen = true }, Modifier.size(48.dp).semantics { contentDescription = more }) {
+                    Text("⋯", Modifier.clearAndSetSemantics {}, style = MaterialTheme.typography.titleLarge)
+                }
+                DropdownMenu(menuOpen, { menuOpen = false }) {
+                    for ((title, command) in listOfNotNull((R.string.undo_split to undo).takeIf { card.origin != null }, R.string.defer to defer)) {
+                        DropdownMenuItem({ Text(stringResource(title)) }, { menuOpen = false; command() }, Modifier.heightIn(min = 48.dp))
                     }
                 }
             }
@@ -867,13 +886,49 @@ private fun StorageFailure() {
     Text(stringResource(R.string.storage_failed), style = MaterialTheme.typography.bodyLarge)
 }
 
+/** [label]을 주면 TalkBack은 보이는 글자 대신 [label]을 읽는다. */
 @Composable
-private fun CommandButton(@StringRes title: Int, enabled: Boolean = true, prominent: Boolean = true, onClick: () -> Unit) {
-    val modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+private fun CommandButton(@StringRes title: Int, enabled: Boolean = true, prominent: Boolean = true, label: String? = null, onClick: () -> Unit) {
+    val modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
+    val text = @Composable { Text(stringResource(title), if (label != null) Modifier.clearAndSetSemantics {} else Modifier) }
     if (prominent) {
-        Button(onClick, modifier, enabled) { Text(stringResource(title)) }
+        Button(onClick, modifier, enabled) { text() }
     } else {
-        OutlinedButton(onClick, modifier, enabled) { Text(stringResource(title)) }
+        OutlinedButton(onClick, modifier, enabled) { text() }
+    }
+}
+
+/** 대체 행동을 기다리거나 받지 못한 상태와 보류한 행동 목록이다. 다른 목표로 자동 이동하지 않는다. */
+@Composable
+private fun OnHoldContent(screen: ProgressScreen.OnHold, flow: ProgressFlow, run: (suspend () -> Unit) -> Unit, resume: (Long) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Heading(if (screen.status == HoldStatus.NoAction) R.string.on_hold_title else R.string.next_action_title, MaterialTheme.typography.titleLarge)
+        if (screen.status == HoldStatus.NoAction) {
+            Text(stringResource(R.string.on_hold_no_action), style = MaterialTheme.typography.bodyLarge)
+            CommandButton(R.string.find_another_action, prominent = false) { run(flow::retrySuggestion) }
+        } else {
+            SuggestionStatus(R.string.preparing_next_action, screen.problem, flow, run)
+        }
+        Heading(R.string.deferred_actions, MaterialTheme.typography.titleMedium)
+        for (action in screen.deferred) {
+            Card(Modifier.fillMaxWidth()) {
+                Box(Modifier.padding(16.dp)) { DeferredAction(action) { resume(action.id) } }
+            }
+        }
+    }
+}
+
+/** 보류한 행동 하나와 '재개'다. '재개'는 할 일과 함께 읽힌다. */
+@Composable
+private fun DeferredAction(action: ActionCard, resume: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(action.task, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+        Text(
+            stringResource(R.string.deferred_done_when, action.doneWhen),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        CommandButton(R.string.resume, prominent = false, label = stringResource(R.string.resume_label, action.task), onClick = resume)
     }
 }
 
@@ -899,8 +954,11 @@ internal val SuggestionProblem.reason: Int
         }
     }
 
-/** iOS `announceChange`와 같은 조건과 문장이다. 이 단계에서 닿는 화면만 다룬다. */
-private fun announcement(old: ProgressScreen, new: ProgressScreen, resources: Resources): String? {
+/**
+ * iOS `announceChange`와 같은 조건과 문장이다. 이 단계에서 닿는 화면만 다룬다. [oldDeferred]·[deferred]는 바뀌기 전·뒤의 보류 목록이다.
+ * iOS와 달리 재개한 행동이 바뀌기 전에 보류였는지도 본다. 보류 직후 대체 행동이 한 프레임 안에 오면 보류 중 화면을 건너뛰기 때문이다.
+ */
+private fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred: List<ActionCard>, deferred: List<ActionCard>, resources: Resources): String? {
     val messages = buildList {
         if (old is ProgressScreen.CurrentAction && new is ProgressScreen.AwaitingNextAction) add(resources.getString(R.string.announce_completed))
         when (new) {
@@ -916,8 +974,23 @@ private fun announcement(old: ProgressScreen, new: ProgressScreen, resources: Re
                 } else {
                     if (oldCard != null && new.card.origin?.id == oldCard.id) add(resources.getString(R.string.announce_split, oldCard.task))
                     else if (oldCard?.origin?.id == new.card.id) add(resources.getString(R.string.announce_undo))
+                    else if ((old as? ProgressScreen.OnHold)?.deferred?.any { it.id == new.card.id } == true) add(resources.getString(R.string.announce_resumed))
+                    else if (oldCard != null && deferred.any { it.id == oldCard.id } && oldDeferred.any { it.id == new.card.id }) add(resources.getString(R.string.announce_resumed_swapped))
                     add(resources.getString(R.string.announce_current_action, new.card.task))
                 }
+            }
+            is ProgressScreen.OnHold -> {
+                val oldCard = (old as? ProgressScreen.CurrentAction)?.card
+                if (oldCard != null) add(resources.getString(if (new.deferred.any { it.id == oldCard.id }) R.string.announce_deferred else R.string.announce_completed))
+                add(
+                    resources.getString(
+                        when (val status = new.status) {
+                            HoldStatus.Waiting -> R.string.preparing_next_action
+                            is HoldStatus.Problem -> status.problem.reason
+                            HoldStatus.NoAction -> R.string.announce_on_hold
+                        },
+                    ),
+                )
             }
             is ProgressScreen.AwaitingFirstAction -> add(resources.getString(new.problem?.reason ?: R.string.preparing_first_action))
             is ProgressScreen.AwaitingNextAction -> add(resources.getString(new.problem?.reason ?: R.string.preparing_next_action))
