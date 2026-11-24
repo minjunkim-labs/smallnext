@@ -35,7 +35,14 @@ data class Drafts(val goalInput: GoalInput = GoalInput(), val answer: String = "
 /** 확인 질문의 답이나 수정 중인 완료 조건의 초안이다. [text]가 null이면 아직 저장한 초안이 없다. */
 data class SuggestionInput(val requestId: Long, val text: String?)
 
-data class GoalDetails(val id: Long, val statement: String, val completionCriteria: String?, val context: GoalContext)
+data class GoalDetails(
+    val id: Long,
+    val statement: String,
+    val completionCriteria: String?,
+    val context: GoalContext,
+    /** 보류한 행동이다. 현재 행동이 있어도 재개할 수 있다. */
+    val deferredActions: List<ActionCard> = emptyList(),
+)
 
 data class ActionCard(
     val id: Long,
@@ -75,9 +82,17 @@ sealed interface SmallerStatus {
     data class Problem(val problem: SuggestionProblem) : SmallerStatus
 }
 
+/** 현재 행동이 없고 보류한 행동이 있을 때의 제안 상태다. iOS `HoldStatus`와 같다. */
+sealed interface HoldStatus {
+    data object Waiting : HoldStatus
+    data class Problem(val problem: SuggestionProblem) : HoldStatus
+    /** 공급자가 선행 조건이 준비된 다른 행동이 없다고 답했다. */
+    data object NoAction : HoldStatus
+}
+
 /**
  * iOS `ProgressScreen` 중 이 단계에서 닿는 상태다. 대기 화면의 `problem`이 null이면 제안을 기다리는 중이다.
- * 정보 부족 안내·행동 질문·보류 중·목표 중단은 해당 티켓(#354~#356)에서 더한다.
+ * 정보 부족 안내·행동 질문·목표 중단은 해당 티켓(#355, #356)에서 더한다.
  */
 sealed interface ProgressScreen {
     data object GoalInput : ProgressScreen
@@ -87,6 +102,10 @@ sealed interface ProgressScreen {
     data class CurrentAction(val card: ActionCard, val smaller: SmallerStatus? = null) : ProgressScreen
     /** 완료 후 다음 행동을 받기 전이다. 완료 기록을 유지한다. */
     data class AwaitingNextAction(override val problem: SuggestionProblem?) : ProgressScreen
+    /** 현재 행동이 없고 보류한 행동이 있다. 보류한 행동을 생성 순서대로 담아 재개할 수 있게 한다. */
+    data class OnHold(val deferred: List<ActionCard>, val status: HoldStatus) : ProgressScreen {
+        override val problem: SuggestionProblem? get() = (status as? HoldStatus.Problem)?.problem
+    }
 
     /** 실패·중단·취소한 제안의 문제다. '다시 시도'를 보여줄 때만 값이 있다. */
     val problem: SuggestionProblem? get() = null
@@ -98,6 +117,7 @@ val ProgressScreen.isWaitingForSuggestion: Boolean
         is ProgressScreen.PreparingGoal -> this == ProgressScreen.PreparingGoal(null, null, null)
         is ProgressScreen.AwaitingFirstAction, is ProgressScreen.AwaitingNextAction -> problem == null
         is ProgressScreen.CurrentAction -> smaller == SmallerStatus.Waiting
+        is ProgressScreen.OnHold -> status == HoldStatus.Waiting
         ProgressScreen.GoalInput -> false
     }
 
@@ -110,7 +130,7 @@ data class ProgressState(
 
 class ProgressFlowException(val reason: Reason) : RuntimeException(reason.name) {
     enum class Reason { EMPTY_GOAL, EMPTY_ANSWER, GOAL_INPUT_NOT_ACTIVE, INVALID_GOAL_CONTEXT, GOAL_NOT_READY, GOAL_NOT_FOUND, EMPTY_RESULT, ACTION_NOT_CURRENT,
-        SPLIT_SOURCE_NOT_FOUND, ANSWER_EXCEEDS_REQUEST_LIMIT,
+        SPLIT_SOURCE_NOT_FOUND, ANSWER_EXCEEDS_REQUEST_LIMIT, DEFERRED_ACTION_NOT_FOUND,
     }
 }
 
@@ -369,15 +389,58 @@ class ProgressFlow private constructor(
         if ((state.value.screen as? ProgressScreen.CurrentAction)?.card?.id == origin.id) suggestionJob?.cancel()
     }
 
-    /** 실패·중단·취소한 제안만 다시 요청한다. 기다리는 중이면 무시한다. */
+    /**
+     * 현재 행동을 보류하고 대체 행동을 요청한다. 완료 기록을 만들지 않고 행동 결과를 지우지 않는다.
+     * [actionId]를 주면 그 행동이 지금 보이는 현재 행동일 때만 보류한다.
+     */
+    suspend fun deferAction(actionId: Long? = null) = serially {
+        val card = (state.value.screen as? ProgressScreen.CurrentAction)?.card ?: return@serially
+        if (actionId != null && card.id != actionId) return@serially
+        perform { db ->
+            val goalId = selectedGoalId(db) ?: return@perform null
+            if (db.update("UPDATE action SET status = 'deferred' WHERE id = ? AND goal_id = ? AND status = 'current'", card.id, goalId) != 1) {
+                return@perform null
+            }
+            bumpRevision(db, goalId)
+            // 보류한 행동에 대한 대기 요청은 이전 상태에 대한 요청이다.
+            endPendingRequests(db, goalId, "interrupted")
+            insertRequest(db, goalId, SuggestionKind.REPLACEMENT)
+        }
+    }
+
+    /**
+     * 보류한 행동 하나를 현재 행동으로 되돌린다. 현재 행동이 있으면 그 행동을 보류한다.
+     * 재개를 선행 조건 해결로 기록하지 않는다. 재개할 행동이 없으면 [ProgressFlowException]을 던지고 아무것도 바꾸지 않는다.
+     */
+    suspend fun resume(actionId: Long) = serially {
+        val screen = state.value.screen
+        if (screen !is ProgressScreen.CurrentAction && screen !is ProgressScreen.OnHold) return@serially
+        perform { db ->
+            val goalId = selectedGoalId(db) ?: return@perform null
+            // 현재 행동이 하나뿐이어야 하므로 먼저 보류한다. 재개할 행동이 없으면 던져서 되돌린다.
+            db.update("UPDATE action SET status = 'deferred' WHERE goal_id = ? AND status = 'current' AND id != ?", goalId, actionId)
+            if (db.update("UPDATE action SET status = 'current' WHERE id = ? AND goal_id = ? AND status = 'deferred'", actionId, goalId) != 1) {
+                fail(ProgressFlowException.Reason.DEFERRED_ACTION_NOT_FOUND)
+            }
+            bumpRevision(db, goalId)
+            endPendingRequests(db, goalId, "interrupted")
+            null
+        }
+        // 재개한 뒤 결과를 버릴 공급자 작업은 취소한다.
+        if ((state.value.screen as? ProgressScreen.CurrentAction)?.card?.id == actionId) suggestionJob?.cancel()
+    }
+
+    /** 실패·중단·취소한 제안과 대체 후보가 없는 보류 중 화면만 다시 요청한다. 기다리는 중이면 무시한다. */
     suspend fun retrySuggestion() = serially {
-        if (state.value.screen.problem == null) return@serially
+        val screen = state.value.screen
+        if (screen.problem == null && (screen as? ProgressScreen.OnHold)?.status != HoldStatus.NoAction) return@serially
         perform { db ->
             val goalId = selectedGoalId(db) ?: return@perform null
             val latest = SuggestionKind.of(db.string("SELECT kind FROM suggestion_request WHERE goal_id = ? ORDER BY id DESC LIMIT 1", goalId))
             // 결과 저장에 실패해 pending으로 남은 요청을 끝낸다. 늦게 온 결과는 적용하지 않는다.
             endPendingRequests(db, goalId, "interrupted")
-            // 첫 행동·다음 행동은 같은 종류로 다시 요청한다. 그 밖에는 현재 행동이 없을 때 대체 요청이다.
+            // 첫 행동·다음 행동은 같은 종류로 다시 요청해 분할 원본 문맥을 유지한다.
+            // 그 밖에는 현재 행동이 없을 때 대체 요청이다. 모든 요청은 보류한 행동을 제외한다.
             val kind = when (latest) {
                 SuggestionKind.GOAL_PREPARATION -> SuggestionKind.GOAL_PREPARATION
                 SuggestionKind.FIRST_ACTION, SuggestionKind.NEXT_ACTION, null ->
@@ -462,6 +525,7 @@ class ProgressFlow private constructor(
                         is ProgressScreen.AwaitingNextAction -> if (screen.problem == null) screen.copy(problem = failed) else screen
                         is ProgressScreen.CurrentAction ->
                             if (screen.smaller == SmallerStatus.Waiting) screen.copy(smaller = SmallerStatus.Problem(failed)) else screen
+                        is ProgressScreen.OnHold -> if (screen.status == HoldStatus.Waiting) screen.copy(status = HoldStatus.Problem(failed)) else screen
                         else -> screen
                     },
                 )
@@ -495,7 +559,7 @@ class ProgressFlow private constructor(
 
         /**
          * 요청이 아직 `pending`이고 목표 리비전이 같을 때만 결과를 적용한다. 리비전이 바뀐 요청은 `interrupted`로 끝낸다.
-         * 아직 화면이 없는 후보(더 작게가 아닌 행동 요청의 질문, 정보 부족, 대체 후보 없음)는 부적합으로 끝낸다(#354, #356).
+         * 아직 화면이 없는 후보(더 작게가 아닌 행동 요청의 질문, 정보 부족)는 부적합으로 끝낸다(#356).
          */
         private fun apply(db: SupportSQLiteDatabase, pending: PendingSuggestion, outcome: Result<SuggestionCandidate>) {
             val (status, revision) = db.query(
@@ -531,7 +595,9 @@ class ProgressFlow private constructor(
                 }
                 is SuggestionCandidate.Action -> candidate.action
                 is SuggestionCandidate.MinimalAction -> candidate.action
-                is SuggestionCandidate.InsufficientInfo, SuggestionCandidate.NoAction, null ->
+                // 보류 중 화면을 보여준다. 정책은 대체 요청의 후보 없음만 받는다.
+                SuggestionCandidate.NoAction -> return finishRequest(db, pending.id, "applied", null)
+                is SuggestionCandidate.InsufficientInfo, null ->
                     return finishRequest(db, pending.id, "failed", UNSUITABLE)
             }
             // 분할 원본은 내용을 바꾸지 않고 `split`으로 남긴다. 남은 범위와 목표의 완료 조건을 유지한다.
@@ -600,7 +666,7 @@ class ProgressFlow private constructor(
                 completedTasks = db.strings("SELECT a.task $completed", goalId),
                 blocker = db.string("SELECT blocker FROM goal WHERE id = ?", goalId),
                 splitSources = if (kind == SuggestionKind.SMALLER) splitSources(db, goalId) else emptyList(),
-                deferredTasks = db.strings("SELECT task FROM action WHERE goal_id = ? AND status = 'deferred' ORDER BY sequence", goalId),
+                deferredTasks = deferredCards(db, goalId).map { it.task },
                 context = details.context,
                 completionCriteria = details.completionCriteria,
                 stateKey = "$goalId:$revision",
@@ -697,7 +763,13 @@ class ProgressFlow private constructor(
                     availableMinutes = if (it.isNull(6)) null else it.getInt(6),
                 ),
             )
-        }.firstOrNull()?.let { it.copy(context = it.context.copy(answers = answers(db, goalId, goalPreparation = true))) }
+        }.firstOrNull()?.let {
+            it.copy(context = it.context.copy(answers = answers(db, goalId, goalPreparation = true)), deferredActions = deferredCards(db, goalId))
+        }
+
+        private fun deferredCards(db: SupportSQLiteDatabase, goalId: Long) = db.query(
+            "SELECT id, task, done_when, estimated_minutes FROM action WHERE goal_id = ? AND status = 'deferred' ORDER BY sequence", goalId,
+        ) { ActionCard(it.getLong(0), it.getString(1), it.getString(2), it.getInt(3)) }
 
         private fun hasCompletion(db: SupportSQLiteDatabase, goalId: Long) =
             db.long("SELECT EXISTS (SELECT 1 FROM action WHERE goal_id = ? AND status = 'done')", goalId) == 1L
@@ -727,6 +799,16 @@ class ProgressFlow private constructor(
                     }
                 }
                 return ProgressScreen.CurrentAction(card, smaller)
+            }
+            // 보류한 행동이 있으면 어떤 요청을 기다리거나 실패해도 재개할 수 있게 보류 목록을 보여준다.
+            val deferred = deferredCards(db, goalId)
+            if (deferred.isNotEmpty()) {
+                val status = when {
+                    problem != null -> HoldStatus.Problem(problem)
+                    latest?.status == "pending" -> HoldStatus.Waiting
+                    else -> HoldStatus.NoAction
+                }
+                return ProgressScreen.OnHold(deferred, status)
             }
             if (hasCompletion(db, goalId)) return ProgressScreen.AwaitingNextAction(problem)
             return ProgressScreen.AwaitingFirstAction(statement, problem)

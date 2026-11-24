@@ -45,6 +45,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.smallnext.app.data.AppDatabase
 import dev.smallnext.app.progress.SuggestionCandidate.Action
 import dev.smallnext.app.progress.SuggestionCandidate.GoalSummary
+import dev.smallnext.app.progress.SuggestionCandidate.NoAction
 import dev.smallnext.app.progress.SuggestionCandidate.Question
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -632,8 +633,13 @@ class CoreFlowScreenTest {
         val smaller = bounds("더 작게")
         assertTrue(complete.bottom <= smaller.top)
         compose.onNodeWithText("더 작게").assertHeightIsAtLeast(48.dp)
-        // 되돌릴 분할 원본이 없으면 보조 메뉴가 없다. '나중에'는 #354에서 더한다.
-        compose.onAllNodes(hasContentDescription("더 보기")).assertCountEquals(0)
+        // 되돌릴 분할 원본이 없으면 보조 메뉴에는 '나중에'만 있다. 시스템 뒤로 가기로 메뉴를 닫는다.
+        compose.onNode(hasContentDescription("더 보기")).assertHeightIsAtLeast(48.dp).performClick()
+        compose.onNodeWithText("나중에").assertHeightIsAtLeast(48.dp)
+        compose.onAllNodes(hasText("되돌리기")).assertCountEquals(0)
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("나중에")).fetchSemanticsNodes().isEmpty() }
 
         compose.onNodeWithText("더 작게").performClick()
         waitForText("더 쉬운 행동을 준비하고 있어요.")
@@ -660,7 +666,7 @@ class CoreFlowScreenTest {
         compose.onNodeWithText("되돌리기").assertHeightIsAtLeast(48.dp).performClick()
         waitForText(first.task)
         assertAnnounced("나누기 전 행동으로 되돌렸어요. 작은 행동은 보류에 남겼어요. 지금 할 행동: ${first.task}")
-        compose.onNodeWithText("나눴던 작은 행동은 보류에 남겼어요.").assertIsDisplayed()
+        compose.onNodeWithText("나눴던 작은 행동은 보류에 남겼어요. 목표 보기에서 재개할 수 있어요.").assertIsDisplayed()
         assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE status = 'deferred'"))
     }
 
@@ -770,5 +776,105 @@ class CoreFlowScreenTest {
         compose.onNodeWithText(message).performScrollTo().assertIsDisplayed()
         assertEquals(long, flow.state.value.suggestionInput?.text)
         assertEquals(SmallerStatus.Question(question), (flow.state.value.screen as ProgressScreen.CurrentAction).smaller)
+    }
+
+    // 나중에·보류 중·재개(#354)
+
+    private fun openMenuAndDefer() {
+        compose.onNode(hasContentDescription("더 보기")).performScrollTo().clickAfterTyping()
+        compose.onNodeWithText("나중에").assertHeightIsAtLeast(48.dp).performClick()
+    }
+
+    // '나중에'로 보류하면 대기 → 보류 중을 알리고, '재개'는 할 일과 함께 읽히며 48dp 이상이다.
+    @Test
+    fun deferShowsOnHoldAndResumeIsReadWithTheTask() {
+        val (flow, provider) = gatedFlowWithCard(NoAction, Action(second))
+        show(flow)
+        waitForText(first.task)
+        openMenuAndDefer()
+        waitForText("다음 행동을 준비하고 있어요.")
+        assertAnnounced("행동을 보류했어요. 다음 행동을 준비하고 있어요.")
+        assertHeading("다음 행동 대기")
+        assertHeading("보류한 행동")
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+
+        provider.release()
+        waitForText("보류 중")
+        assertAnnounced("보류 중. 지금 할 수 있는 다른 행동이 없어요.")
+        assertHeading("보류 중")
+        compose.onNodeWithText("지금 할 수 있는 다른 행동이 없어요. 보류한 행동을 재개하거나 다른 행동을 다시 찾아요.").assertIsDisplayed()
+        compose.onNodeWithText("완료 조건: ${first.doneWhen}").assertIsDisplayed()
+        compose.onNodeWithText("다른 행동 다시 찾기").assertHeightIsAtLeast(48.dp)
+        val resume = compose.onNode(hasContentDescription("재개: ${first.task}"))
+        resume.assertHeightIsAtLeast(48.dp)
+        // 다른 목표로 자동 이동하지 않는다.
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal"))
+
+        resume.performScrollTo().performClick()
+        waitForText("지금 할 행동")
+        assertAnnounced("보류한 행동을 재개했어요. 지금 할 행동: ${first.task}")
+        assertEquals(0L, count("SELECT COUNT(*) FROM action WHERE status = 'deferred'"))
+    }
+
+    // '목표 보기'에서 재개하면 하던 행동이 보류로 가고, 그 행동의 보이는 초안을 먼저 저장한다.
+    @Test
+    fun goalViewResumesDeferredActionAfterSavingTheVisibleDraft() {
+        val (flow, provider) = gatedFlowWithCard(Action(second))
+        show(flow)
+        waitForText(first.task)
+        openMenuAndDefer()
+        waitForText("다음 행동을 준비하고 있어요.")
+        provider.release()
+        waitForText(second.task)
+        assertAnnounced("지금 할 행동: ${second.task}")
+
+        val setText = resultField.fetchSemanticsNode().config[SemanticsActions.SetText].action!!
+        compose.runOnUiThread { setText(AnnotatedString("대체 행동 초안")) }
+        compose.onNodeWithText("목표 보기").performScrollTo().clickAfterTyping()
+        waitForText("재개하면 하던 행동은 보류로 옮겨요.")
+        assertHeading("보류한 행동")
+        compose.onNode(hasContentDescription("재개: ${first.task}")).assertHeightIsAtLeast(48.dp).performScrollTo().performClick()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("재개하면 하던 행동은 보류로 옮겨요.")).fetchSemanticsNodes().isEmpty() }
+        waitForText(first.task)
+        assertAnnounced("보류한 행동을 재개했어요. 하던 행동은 보류로 옮겼어요. 지금 할 행동: ${first.task}")
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE is_draft AND body = '대체 행동 초안'"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE status = 'deferred' AND task = '${second.task}'"))
+    }
+
+    // 최대 글꼴: 보류 중 화면의 문장이 잘리지 않고 버튼이 48dp 이상이다.
+    @Test
+    fun largestFontKeepsOnHoldReadable() {
+        val (flow, provider) = gatedFlowWithCard(NoAction)
+        runBlocking {
+            flow.deferAction()
+            provider.release()
+            flow.awaitSuggestion()
+        }
+        show(flow, fontScale = 2f)
+        waitForText("보류 중")
+        for (text in listOf("지금 할 수 있는 다른 행동이 없어요. 보류한 행동을 재개하거나 다른 행동을 다시 찾아요.", first.task, "완료 조건: ${first.doneWhen}")) {
+            compose.onNodeWithText(text).performScrollTo()
+            assertFullyLaidOut(text)
+        }
+        compose.onNodeWithText("다른 행동 다시 찾기").performScrollTo().assertHeightIsAtLeast(48.dp)
+        assertFullyLaidOut("다른 행동 다시 찾기", unmerged = true)
+        compose.onNode(hasContentDescription("재개: ${first.task}")).performScrollTo().assertHeightIsAtLeast(48.dp)
+    }
+
+    // 보류 직후 대체 행동이 한 프레임 안에 오면 보류 중 화면을 건너뛴다. 그때도 재개가 아니라 보류를 알린다.
+    @Test
+    fun deferAnnouncedWhenReplacementSkipsOnHold() {
+        val old = ActionCard(1, first.task, first.doneWhen, first.estimatedMinutes)
+        val replacement = ActionCard(2, second.task, second.doneWhen, second.estimatedMinutes)
+        val resources = context.resources
+        assertEquals(
+            "행동을 보류했어요. 지금 할 행동: ${second.task}",
+            announcement(ProgressScreen.CurrentAction(old), ProgressScreen.CurrentAction(replacement), emptyList(), listOf(old), resources),
+        )
+        // 바뀌기 전에도 보류였던 행동이 현재 행동이 되면 재개다.
+        assertEquals(
+            "보류한 행동을 재개했어요. 하던 행동은 보류로 옮겼어요. 지금 할 행동: ${old.task}",
+            announcement(ProgressScreen.CurrentAction(replacement), ProgressScreen.CurrentAction(old), listOf(old), listOf(replacement), resources),
+        )
     }
 }

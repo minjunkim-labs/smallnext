@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.smallnext.app.data.AppDatabase
 import dev.smallnext.app.progress.SuggestionCandidate.Action
 import dev.smallnext.app.progress.SuggestionCandidate.GoalSummary
+import dev.smallnext.app.progress.SuggestionCandidate.NoAction
 import dev.smallnext.app.progress.SuggestionCandidate.Question
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -982,7 +983,6 @@ class ProgressFlowTest {
         assertEquals(3, provider.requests.last().completedActionIds.size)
     }
 
-    // iOS testSplitInheritsTargetAndNotesSurviveUndoAndResume의 분할·되돌리기 부분이다. 보류·재개는 #354에서 더한다.
     @Test
     fun testSplitInheritsTargetAndNotesSurviveUndoAndResume() = runBlocking {
         val initial = first.copy(targetName = "업무 보고서", targetDescription = "내가 작성 중인 보고서", materialLinks = listOf("https://example.com/report"))
@@ -1006,6 +1006,13 @@ class ProgressFlowTest {
         assertEquals("원본 초안", restored.draft)
         assertEquals(listOf("원본에 남긴 결과"), restored.results.map { it.body })
         assertEquals(listOf("작은 행동의 결과"), restored.previousResults.map { it.body })
+        val reopened = makeFlow(UnavailableSuggestionProvider)
+        reopened.deferAction()
+        reopened.awaitSuggestion()
+        reopened.resume(small.id)
+        val resumed = reopened.card()
+        assertEquals(listOf("작은 행동의 결과"), resumed.results.map { it.body })
+        assertEquals("작은 행동 초안", resumed.draft)
     }
 
     // 화면이 누른 카드의 ID를 넘기면 그사이 바뀐 현재 행동에는 더 작게·되돌리기를 실행하지 않는다.
@@ -1029,5 +1036,257 @@ class ProgressFlowTest {
         flow.undoSplit(tiny.id)
         assertEquals(current(small), flow.state.value.screen)
         assertEquals(3, provider.requests.size)
+    }
+
+    // 나중에·보류 중·재개(#354). 이름은 iOS ProgressFlowTests와 같다.
+    // iOS는 명령이 메인 스레드에서 동기로 끝난다. 대기 화면을 확인하는 테스트는 gated 공급자로 결과 도착을 늦춘다.
+
+    private fun onHold(vararg deferred: ActionCard, status: HoldStatus) =
+        ProgressScreen.OnHold(deferred.map { ActionCard(it.id, it.task, it.doneWhen, it.estimatedMinutes) }, status)
+
+    @Test
+    fun testDeferRequestsReplacementAndKeepsDeferredAction() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(second), gated = true)
+        provider.release()
+        val flow = makeFlow(provider)
+        val deferred = firstCard(flow)
+        probe.execSQL(
+            "INSERT INTO action_note (action_id, body, is_draft, updated_at) VALUES (?, '메모 위치 확인', 0, ?)",
+            arrayOf(deferred.id, System.currentTimeMillis()),
+        )
+
+        flow.deferAction()
+        assertEquals(onHold(deferred, status = HoldStatus.Waiting), flow.state.value.screen)
+        provider.release()
+        flow.awaitSuggestion()
+        val replacement = flow.card()
+        assertEquals(second.task, replacement.task)
+        assertNull(replacement.origin)
+        assertEquals("deferred", status(first.task))
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note"))
+        assertEquals(listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.REPLACEMENT), provider.requests.map { it.kind })
+        assertEquals(listOf(first.task), provider.requests[1].deferredTasks)
+    }
+
+    @Test
+    fun testDeferWithoutReplacementShowsOnHoldWithoutSwitchingGoal() = runBlocking {
+        val provider = ScriptedProvider(Action(third), Action(first), NoAction, Action(first), gated = true)
+        repeat(3) { provider.release() }
+        val other = makeFlow(provider)
+        startGoal(other, "다른 목표")
+        other.awaitSuggestion()
+        // iOS는 같은 흐름에서 새 목표를 시작한다. Android에는 아직 새 목표 명령이 없어 [newGoalFlow]를 쓴다.
+        val flow = newGoalFlow(provider)
+        val deferred = firstCard(flow)
+
+        flow.deferAction()
+        flow.awaitSuggestion()
+        assertEquals(onHold(deferred, status = HoldStatus.NoAction), flow.state.value.screen)
+        assertEquals(1L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` = 'selected_goal_id' AND value = (SELECT MAX(id) FROM goal)"))
+
+        // 같은 행동을 대체 후보로 받으면 적용하지 않는다.
+        flow.retrySuggestion()
+        assertEquals(onHold(deferred, status = HoldStatus.Waiting), flow.state.value.screen)
+        provider.release()
+        flow.awaitSuggestion()
+        assertEquals(onHold(deferred, status = HoldStatus.Problem(SuggestionProblem.Unsuitable)), flow.state.value.screen)
+    }
+
+    @Test
+    fun testResumeRestoresDeferredActionWithoutResolvingAnything() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), NoAction))
+        val deferred = firstCard(flow)
+        probe.execSQL("UPDATE goal SET blocker = '자료가 없음'")
+        flow.deferAction()
+        flow.awaitSuggestion()
+
+        flow.resume(deferred.id)
+        assertEquals(current(deferred), flow.state.value.screen)
+        assertEquals("current", status(first.task))
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE blocker = '자료가 없음'"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+    }
+
+    @Test
+    fun testResumeFromCurrentActionDefersTheCurrentOne() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        val deferred = firstCard(flow)
+        flow.deferAction()
+        flow.awaitSuggestion()
+        val replacement = flow.card()
+        assertEquals(listOf(deferred.id), flow.state.value.goal?.deferredActions?.map { it.id })
+
+        flow.resume(deferred.id)
+        assertEquals(deferred.id, flow.card().id)
+        assertEquals("deferred", status(second.task))
+        assertEquals(listOf(replacement.id), flow.state.value.goal?.deferredActions?.map { it.id })
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+        assertEquals(ProgressFlowException.Reason.DEFERRED_ACTION_NOT_FOUND, (failure { flow.resume(deferred.id) } as ProgressFlowException).reason)
+        // 재개할 행동이 없으면 현재 행동을 보류한 쓰기도 되돌린다.
+        assertTrue(failure { flow.resume(Long.MAX_VALUE) } is ProgressFlowException)
+        assertEquals("current", status(first.task))
+        val reopened = makeFlow(SuspendedProvider())
+        assertEquals(deferred.id, reopened.card().id)
+        assertEquals(listOf(replacement.id), reopened.state.value.goal?.deferredActions?.map { it.id })
+    }
+
+    @Test
+    fun testResumeWhileSmallerWaitsEndsTheRequest() = runBlocking {
+        val before = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        val deferredId = firstCard(before).id
+        before.deferAction()
+        before.awaitSuggestion()
+        closeAll()
+
+        val provider = SuspendedProvider()
+        val flow = makeFlow(provider)
+        flow.makeSmaller()
+        awaitRequest(provider.requests)
+        flow.resume(deferredId)
+        flow.awaitSuggestion()
+        assertTrue(provider.cancelled)
+        assertEquals(deferredId, flow.card().id)
+        assertNull(flow.smaller())
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request WHERE status = 'pending'"))
+    }
+
+    @Test
+    fun testOnHoldSurvivesReopenAndPendingReplacementCanBeRetried() = runBlocking {
+        val before = makeFlow(ScriptedProvider(Action(first), NoAction))
+        val deferred = firstCard(before)
+        before.deferAction()
+        before.awaitSuggestion()
+        closeAll()
+        assertEquals(onHold(deferred, status = HoldStatus.NoAction), makeFlow(SuspendedProvider()).state.value.screen)
+
+        val waiting = makeFlow(SuspendedProvider())
+        waiting.resume(deferred.id)
+        waiting.deferAction()
+        assertEquals(onHold(deferred, status = HoldStatus.Waiting), waiting.state.value.screen)
+        closeAll()
+
+        val provider = ScriptedProvider(Action(second))
+        val reopened = makeFlow(provider)
+        assertEquals(onHold(deferred, status = HoldStatus.Problem(SuggestionProblem.Interrupted)), reopened.state.value.screen)
+        reopened.retrySuggestion()
+        reopened.awaitSuggestion()
+        assertEquals(second.task, reopened.card().task)
+        assertEquals(listOf(SuggestionKind.REPLACEMENT), provider.requests.map { it.kind })
+    }
+
+    @Test
+    fun testDeferredActionCanBeResumedAfterNextActionFails() = runBlocking {
+        val provider = ScriptedProvider(
+            listOf(Result.success(Action(first)), Result.success(Action(second))) + failures(SuggestionFailure.TIMED_OUT), gated = true,
+        )
+        repeat(2) { provider.release() }
+        val flow = makeFlow(provider)
+        val deferred = firstCard(flow)
+        flow.deferAction()
+        flow.awaitSuggestion()
+        flow.complete(flow.card().id)
+        // 다음 행동을 기다리는 동안에도 보류한 행동을 보여준다.
+        assertEquals(onHold(deferred, status = HoldStatus.Waiting), flow.state.value.screen)
+        provider.release()
+        flow.awaitSuggestion()
+        val failed = onHold(deferred, status = HoldStatus.Problem(SuggestionProblem.Failure(SuggestionFailure.TIMED_OUT)))
+        assertEquals(failed, flow.state.value.screen)
+        assertEquals(failed, makeFlow(SuspendedProvider()).state.value.screen)
+
+        flow.resume(deferred.id)
+        assertEquals(current(deferred), flow.state.value.screen)
+        assertEquals(1L, count("SELECT COUNT(*) FROM completion"))
+    }
+
+    @Test
+    fun testFailedNextActionIsRetriedAsNextActionWhileOnHold() = runBlocking {
+        val provider = ScriptedProvider(
+            listOf(Result.success(Action(first)), Result.success(Action(second))) + failures(SuggestionFailure.TIMED_OUT) +
+                Result.success(Action(third)),
+        )
+        val flow = makeFlow(provider)
+        firstCard(flow)
+        flow.deferAction()
+        flow.awaitSuggestion()
+        flow.complete(flow.card().id)
+        flow.awaitSuggestion()
+        flow.retrySuggestion()
+        flow.awaitSuggestion()
+        assertEquals(third.task, flow.card().task)
+        // 실패한 다음 행동은 같은 종류로 다시 요청한다. 보류 목록은 계속 담는다.
+        assertEquals(
+            listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.REPLACEMENT, SuggestionKind.NEXT_ACTION, SuggestionKind.NEXT_ACTION),
+            provider.requests.map { it.kind },
+        )
+        assertEquals(listOf(first.task), provider.requests[3].deferredTasks)
+    }
+
+    @Test
+    fun testNextActionMatchingDeferredActionIsNotApplied() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(second), Action(first))
+        val flow = makeFlow(provider)
+        val deferred = firstCard(flow)
+        flow.deferAction()
+        flow.awaitSuggestion()
+        flow.complete(flow.card().id)
+        flow.awaitSuggestion()
+        assertEquals(onHold(deferred, status = HoldStatus.Problem(SuggestionProblem.Unsuitable)), flow.state.value.screen)
+        assertEquals(SuggestionKind.NEXT_ACTION, provider.requests[2].kind)
+        assertEquals(listOf(first.task), provider.requests[2].deferredTasks)
+    }
+
+    @Test
+    fun testResumedUndoneSmallActionHasNoUndo() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(smaller), NoAction))
+        firstCard(flow)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val small = flow.card()
+        flow.undoSplit()
+        flow.deferAction()
+        flow.awaitSuggestion()
+        val screen = flow.state.value.screen as ProgressScreen.OnHold
+        assertEquals(HoldStatus.NoAction, screen.status)
+        assertEquals(listOf(first.task, smaller.task), screen.deferred.map { it.task })
+
+        // 분할 원본이 이미 보류라서 작은 행동을 재개해도 되돌릴 원본이 없다.
+        flow.resume(small.id)
+        assertNull(flow.card().origin)
+    }
+
+    @Test
+    fun testRecordedResultAndNewDraftSurviveDeferAndResume() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), NoAction))
+        val card = firstCard(flow)
+        flow.updateDraft("남긴 문장", card.id)
+        flow.recordResult("남긴 문장", card.id)
+        val saved = flow.card()
+        assertEquals(listOf("남긴 문장"), saved.results.map { it.body })
+        assertEquals("", saved.draft)
+        flow.updateDraft("다음 문장 작성 중", card.id)
+        flow.deferAction()
+        flow.awaitSuggestion()
+
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider)
+        reopened.resume(card.id)
+        val restored = reopened.card()
+        assertEquals(listOf("남긴 문장"), restored.results.map { it.body })
+        assertEquals("다음 문장 작성 중", restored.draft)
+    }
+
+    // 화면이 누른 카드의 ID를 넘기면 그사이 바뀐 현재 행동은 보류하지 않는다. iOS에는 없는 Android 규칙이다(#353 패턴).
+    @Test
+    fun testDeferIgnoresAStaleCard() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(second))
+        val flow = makeFlow(provider)
+        val deferred = firstCard(flow)
+        flow.deferAction(deferred.id)
+        flow.awaitSuggestion()
+        val replacement = flow.card()
+        flow.deferAction(deferred.id)
+        assertEquals(current(replacement), flow.state.value.screen)
+        assertEquals(2, provider.requests.size)
     }
 }
