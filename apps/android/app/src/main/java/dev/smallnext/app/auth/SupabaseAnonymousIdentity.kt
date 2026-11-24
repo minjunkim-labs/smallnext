@@ -27,6 +27,9 @@ import okhttp3.OkHttpClient
 /** 세션 하나를 담는 저장소다. 없으면 null이다. 읽기·쓰기·지우기에 실패하면 예외를 던진다. */
 interface SessionStore {
     fun read(): String?
+
+    /** 새 계정을 만들기 전에 부른다. 저장할 수 없으면(예: Keystore 키를 만들 수 없음) 예외를 던진다. */
+    fun prepare() = Unit
     fun write(value: String)
     fun delete()
 }
@@ -92,6 +95,8 @@ class SupabaseAnonymousIdentity internal constructor(
         if (auth.currentSessionOrNull() == null) {
             // 저장한 값이 있는데 SDK가 읽지 못했으면 다른 계정을 만들지 않는다.
             if (stored != null) throw SuggestionException(SuggestionFailure.UNAVAILABLE)
+            // 가입 응답을 받은 뒤에는 저장 실패를 되돌릴 수 없다. 키를 쓸 수 없으면 가입하지 않는다.
+            store.prepare()
             auth.signInAnonymously()
         }
         if (auth.currentUserOrNull()?.isAnonymous != true) throw SuggestionException(SuggestionFailure.REJECTED)

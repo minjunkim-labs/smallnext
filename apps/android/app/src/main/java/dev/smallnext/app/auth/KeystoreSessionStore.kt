@@ -4,6 +4,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
 import java.io.File
+import java.io.FileNotFoundException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -17,9 +18,12 @@ import javax.crypto.spec.GCMParameterSpec
  */
 class KeystoreSessionStore(private val file: File, private val alias: String = ALIAS) : SessionStore {
     override fun read(): String? {
-        val atomic = AtomicFile(file)
-        if (!atomic.baseFile.exists()) return null
-        val bytes = atomic.readFully()
+        // readFully는 쓰다 끊긴 `.bak`을 먼저 복구한다. 그 뒤에도 파일이 없을 때만 세션 없음이다.
+        val bytes = try {
+            AtomicFile(file).readFully()
+        } catch (_: FileNotFoundException) {
+            return null
+        }
         check(bytes.size > IV_BYTES) { "session file is truncated" }
         val key = keyStore().getKey(alias, null) as? SecretKey ?: error("session key is unavailable")
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -27,8 +31,12 @@ class KeystoreSessionStore(private val file: File, private val alias: String = A
         return cipher.doFinal(bytes, IV_BYTES, bytes.size - IV_BYTES).toString(Charsets.UTF_8)
     }
 
+    override fun prepare() {
+        key()
+    }
+
     override fun write(value: String) {
-        val key = keyStore().getKey(alias, null) as? SecretKey ?: generateKey()
+        val key = key()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key)
         val data = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
@@ -46,6 +54,8 @@ class KeystoreSessionStore(private val file: File, private val alias: String = A
     }
 
     override fun delete() = AtomicFile(file).delete()
+
+    private fun key() = keyStore().getKey(alias, null) as? SecretKey ?: generateKey()
 
     private fun generateKey(): SecretKey = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run {
         init(

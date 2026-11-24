@@ -48,6 +48,14 @@ class KeystoreSessionStoreTest {
         assertNull(store.read())
     }
 
+    /** Android 10 이하의 AtomicFile은 쓰는 동안 원본을 `.bak`으로 옮긴다. 그때 끊긴 세션도 읽는다. */
+    @Test
+    fun interruptedWriteBackupIsRestored() {
+        store.write("synthetic-session")
+        assertTrue(file.renameTo(File(directory, "session.bak")))
+        assertEquals("synthetic-session", store.read())
+    }
+
     @Test
     fun missingKeyOrTamperedFileBlocksAuthenticationWithoutSignUp() = runBlocking {
         store.write("synthetic-session")

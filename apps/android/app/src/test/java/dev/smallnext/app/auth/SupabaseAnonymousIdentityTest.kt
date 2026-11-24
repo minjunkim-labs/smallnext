@@ -93,6 +93,16 @@ class SupabaseAnonymousIdentityTest {
         }
     }
 
+    /** Android 추가: 첫 실행에서 Keystore 키를 쓸 수 없으면 가입 요청을 보내지 않는다. */
+    @Test
+    fun unavailableKeyNeverCreatesAccount() = runBlocking {
+        val f = fixture()
+        f.store.failPrepare = true
+        assertFailure(SuggestionFailure.UNAVAILABLE) { f.identity.idToken() }
+        assertFailure(SuggestionFailure.UNAVAILABLE) { f.identity.idToken() }
+        assertTrue(f.transport.paths.isEmpty())
+    }
+
     /** Android 추가: 복호화는 됐지만 SDK가 읽지 못한 세션도 새 계정으로 바꾸지 않는다. */
     @Test
     fun unreadableStoredSessionNeverCreatesAccount() = runBlocking {
@@ -187,6 +197,12 @@ class SupabaseAnonymousIdentityTest {
         @Volatile var failReads = false
 
         @Volatile var failWrites = false
+
+        @Volatile var failPrepare = false
+
+        override fun prepare() {
+            if (failPrepare) error("synthetic key failure")
+        }
 
         override fun read(): String? {
             if (failReads) error("synthetic read failure")
