@@ -21,7 +21,9 @@ class KeystoreSessionStore(private val file: File, private val alias: String = A
         // readFully는 쓰다 끊긴 `.bak`을 먼저 복구한다. 그 뒤에도 파일이 없을 때만 세션 없음이다.
         val bytes = try {
             AtomicFile(file).readFully()
-        } catch (_: FileNotFoundException) {
+        } catch (error: FileNotFoundException) {
+            // 파일이 있는데 열 수 없으면 세션 없음이 아니다. 새 계정을 만들지 않게 실패로 전한다.
+            if (file.exists()) throw error
             return null
         }
         check(bytes.size > IV_BYTES) { "session file is truncated" }

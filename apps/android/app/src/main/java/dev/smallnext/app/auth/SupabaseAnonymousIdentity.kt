@@ -36,11 +36,20 @@ interface SessionStore {
 
 /** SDK 기본 저장소 대신 앱이 주입한 [SessionStore]에 세션을 둔다. */
 internal class StoreSessionManager(private val store: SessionStore) : SessionManager {
+    /** 로컬 로그아웃 중에만 true다. */
+    @Volatile var deleteAllowed = false
+
     override suspend fun saveSession(session: UserSession) = store.write(encode(session))
 
     override suspend fun loadSession(): UserSession = store.read()?.let(::decode) ?: throw NoSessionFoundException()
 
-    override suspend fun deleteSession() = store.delete()
+    /**
+     * SDK는 갱신 거부(`session_not_found`)에도 세션을 지운다. 그러면 다음 요청이 새 계정을 만든다.
+     * 그래서 로컬 로그아웃이 아닌 삭제는 무시한다. 저장한 세션이 남아 다음 요청도 갱신만 시도한다.
+     */
+    override suspend fun deleteSession() {
+        if (deleteAllowed) store.delete()
+    }
 
     companion object {
         // 만료 시각은 기본값이 아니라 저장한 값으로 복원해야 한다.
@@ -60,6 +69,7 @@ internal class StoreSessionManager(private val store: SessionStore) : SessionMan
 class SupabaseAnonymousIdentity internal constructor(
     private val auth: Auth,
     private val store: SessionStore,
+    private val sessions: StoreSessionManager,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
     private val lock = Any()
@@ -86,7 +96,14 @@ class SupabaseAnonymousIdentity internal constructor(
     }
 
     /** 이 기기의 세션만 지운다. 계정 삭제(#360)가 서버 삭제 뒤에 부른다. */
-    suspend fun signOutLocally() = auth.signOut(SignOutScope.LOCAL)
+    suspend fun signOutLocally() {
+        sessions.deleteAllowed = true
+        try {
+            auth.signOut(SignOutScope.LOCAL)
+        } finally {
+            sessions.deleteAllowed = false
+        }
+    }
 
     private suspend fun obtain(): String {
         // SDK는 저장소 읽기 실패를 세션 없음으로 본다. 저장소를 읽지 못하면 새 계정을 만들지 않는다.
@@ -120,6 +137,7 @@ class SupabaseAnonymousIdentity internal constructor(
             store: SessionStore,
             client: OkHttpClient = OkHttpClient(),
         ): SupabaseAnonymousIdentity {
+            val sessions = StoreSessionManager(store)
             val supabase = createSupabaseClient(projectUrl, publishableKey) {
                 // SDK의 debug 로그는 세션(토큰 포함)을 출력한다.
                 defaultLogLevel = LogLevel.NONE
@@ -134,11 +152,11 @@ class SupabaseAnonymousIdentity internal constructor(
                     alwaysAutoRefresh = false
                     autoLoadFromStorage = false
                     enableLifecycleCallbacks = false
-                    sessionManager = StoreSessionManager(store)
+                    sessionManager = sessions
                     codeVerifierCache = MemoryCodeVerifierCache()
                 }
             }
-            return SupabaseAnonymousIdentity(supabase.auth, store)
+            return SupabaseAnonymousIdentity(supabase.auth, store, sessions)
         }
     }
 }

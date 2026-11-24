@@ -55,6 +55,21 @@ class SupabaseAnonymousIdentityTest {
         assertEquals(listOf("/auth/v1/token", "/auth/v1/token"), f.transport.paths)
     }
 
+    /** SDK는 `session_not_found` 갱신 거부에 세션을 지운다. 그래도 저장한 세션을 남겨 새 계정을 만들지 않는다. 재시작 뒤도 같다. */
+    @Test
+    fun revokedSessionRefreshNeverCreatesAnotherAccount() = runBlocking {
+        val f = fixture(status = 403, errorCode = "session_not_found")
+        f.store.value = StoreSessionManager.encode(session(expired = true))
+        repeat(2) { assertFailure(SuggestionFailure.UNAVAILABLE) { f.identity.idToken() } }
+        assertNotNull(f.store.value)
+        val restarted = SupabaseAnonymousIdentity.create(
+            "https://auth.example.invalid", "sb_publishable_synthetic", f.store,
+            OkHttpClient.Builder().addInterceptor(f.transport).build(),
+        )
+        assertFailure(SuggestionFailure.UNAVAILABLE) { restarted.idToken() }
+        assertEquals(listOf("/auth/v1/token", "/auth/v1/token", "/auth/v1/token"), f.transport.paths)
+    }
+
     @Test
     fun testAuthenticationFailureDoesNotRetry() = runBlocking {
         val f = fixture(status = 403, delayMillis = 100)
@@ -153,14 +168,14 @@ class SupabaseAnonymousIdentityTest {
 
     private class Fixture(val identity: SupabaseAnonymousIdentity, val transport: AuthTransport, val store: MemoryStore)
 
-    private fun fixture(status: Int = 200, delayMillis: Long = 0): Fixture {
-        val transport = AuthTransport(status, delayMillis)
+    private fun fixture(status: Int = 200, delayMillis: Long = 0, errorCode: String = "invalid_credentials"): Fixture {
+        val transport = AuthTransport(status, delayMillis, errorCode)
         val store = MemoryStore()
         val client = OkHttpClient.Builder().addInterceptor(transport).build()
         return Fixture(SupabaseAnonymousIdentity.create("https://auth.example.invalid", "sb_publishable_synthetic", store, client), transport, store)
     }
 
-    private class AuthTransport(private val status: Int, private val delayMillis: Long) : Interceptor {
+    private class AuthTransport(private val status: Int, private val delayMillis: Long, private val errorCode: String) : Interceptor {
         val paths: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
         @Volatile var logoutScope: String? = null
@@ -177,7 +192,7 @@ class SupabaseAnonymousIdentityTest {
                 """{"access_token":"synthetic-access","token_type":"bearer","expires_in":3600,"refresh_token":"synthetic-refresh-new",""" +
                     """"user":{"id":"00000000-0000-0000-0000-000000000001","aud":"authenticated","is_anonymous":true}}"""
             } else {
-                """{"msg":"synthetic rejection","error_code":"invalid_credentials"}"""
+                """{"msg":"synthetic rejection","error_code":"$errorCode"}"""
             }
             return response(chain, status, body)
         }

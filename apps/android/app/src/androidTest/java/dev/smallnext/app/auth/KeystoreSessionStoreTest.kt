@@ -69,6 +69,18 @@ class KeystoreSessionStoreTest {
         assertBlocked()
     }
 
+    /** 파일이 있는데 열 수 없으면 세션 없음이 아니라 실패다. */
+    @Test
+    fun unopenableSessionFileBlocksAuthenticationWithoutSignUp() = runBlocking {
+        store.write("synthetic-session")
+        assertTrue(file.setReadable(false, false))
+        try {
+            assertBlocked()
+        } finally {
+            file.setReadable(true, true)
+        }
+    }
+
     private suspend fun assertBlocked() {
         try {
             store.read()
