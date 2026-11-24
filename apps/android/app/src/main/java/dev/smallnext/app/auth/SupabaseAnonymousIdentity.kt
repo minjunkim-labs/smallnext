@@ -21,6 +21,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
@@ -73,13 +75,16 @@ class SupabaseAnonymousIdentity internal constructor(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
     private val lock = Any()
+
+    /** 가입·갱신과 로컬 로그아웃을 차례로 실행한다. 로그아웃 뒤에 진행 중이던 가입이 세션을 다시 저장하지 않게 한다. */
+    private val serial = Mutex()
     private var pending: Deferred<String>? = null
 
     /** 동시 요청은 한 번의 가입·갱신을 함께 기다린다. 기다리던 호출이 취소돼도 다른 대기자의 작업은 계속된다. */
     suspend fun idToken(): String {
         currentCoroutineContext().ensureActive()
         val task = synchronized(lock) {
-            pending ?: scope.async { obtain() }.also { task ->
+            pending ?: scope.async { serial.withLock { obtain() } }.also { task ->
                 pending = task
                 task.invokeOnCompletion { synchronized(lock) { if (pending === task) pending = null } }
             }
@@ -96,7 +101,7 @@ class SupabaseAnonymousIdentity internal constructor(
     }
 
     /** 이 기기의 세션만 지운다. 계정 삭제(#360)가 서버 삭제 뒤에 부른다. */
-    suspend fun signOutLocally() {
+    suspend fun signOutLocally() = serial.withLock {
         sessions.deleteAllowed = true
         try {
             auth.signOut(SignOutScope.LOCAL)

@@ -148,6 +148,18 @@ class SupabaseAnonymousIdentityTest {
         assertEquals("local", f.transport.logoutScope)
     }
 
+    /** 진행 중인 가입이 끝난 뒤에 로그아웃한다. 로그아웃 뒤에 세션이 다시 저장되지 않는다. */
+    @Test
+    fun localSignOutWaitsForPendingSignUp() = runBlocking {
+        val f = fixture(delayMillis = 200)
+        val token = async { f.identity.idToken() }
+        repeat(100) { if (f.transport.paths.isEmpty()) delay(5) }
+        f.identity.signOutLocally()
+        assertEquals("synthetic-access", token.await())
+        assertNull(f.store.value)
+        assertEquals(listOf("/auth/v1/signup", "/auth/v1/logout"), f.transport.paths)
+    }
+
     private suspend fun assertFailure(expected: SuggestionFailure, block: suspend () -> Unit) {
         try {
             block()
