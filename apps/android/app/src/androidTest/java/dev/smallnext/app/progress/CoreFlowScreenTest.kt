@@ -823,6 +823,7 @@ class CoreFlowScreenTest {
         show(flow)
         waitForText(first.task)
         openMenuAndDefer()
+        waitForText("다음 행동을 준비하고 있어요.")
         provider.release()
         waitForText(second.task)
         assertAnnounced("지금 할 행동: ${second.task}")
@@ -858,5 +859,22 @@ class CoreFlowScreenTest {
         compose.onNodeWithText("다른 행동 다시 찾기").performScrollTo().assertHeightIsAtLeast(48.dp)
         assertFullyLaidOut("다른 행동 다시 찾기", unmerged = true)
         compose.onNode(hasContentDescription("재개: ${first.task}")).performScrollTo().assertHeightIsAtLeast(48.dp)
+    }
+
+    // 보류 직후 대체 행동이 한 프레임 안에 오면 보류 중 화면을 건너뛴다. 그때도 재개가 아니라 보류를 알린다.
+    @Test
+    fun deferAnnouncedWhenReplacementSkipsOnHold() {
+        val old = ActionCard(1, first.task, first.doneWhen, first.estimatedMinutes)
+        val replacement = ActionCard(2, second.task, second.doneWhen, second.estimatedMinutes)
+        val resources = context.resources
+        assertEquals(
+            "행동을 보류했어요. 지금 할 행동: ${second.task}",
+            announcement(ProgressScreen.CurrentAction(old), ProgressScreen.CurrentAction(replacement), emptyList(), listOf(old), resources),
+        )
+        // 바뀌기 전에도 보류였던 행동이 현재 행동이 되면 재개다.
+        assertEquals(
+            "보류한 행동을 재개했어요. 하던 행동은 보류로 옮겼어요. 지금 할 행동: ${old.task}",
+            announcement(ProgressScreen.CurrentAction(replacement), ProgressScreen.CurrentAction(old), listOf(old), listOf(replacement), resources),
+        )
     }
 }

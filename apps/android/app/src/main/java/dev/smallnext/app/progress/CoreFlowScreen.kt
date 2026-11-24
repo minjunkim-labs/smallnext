@@ -957,8 +957,9 @@ internal val SuggestionProblem.reason: Int
 /**
  * iOS `announceChange`와 같은 조건과 문장이다. 이 단계에서 닿는 화면만 다룬다. [oldDeferred]·[deferred]는 바뀌기 전·뒤의 보류 목록이다.
  * iOS와 달리 재개한 행동이 바뀌기 전에 보류였는지도 본다. 보류 직후 대체 행동이 한 프레임 안에 오면 보류 중 화면을 건너뛰기 때문이다.
+ * 그때는 재개 대신 보류를 알린다.
  */
-private fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred: List<ActionCard>, deferred: List<ActionCard>, resources: Resources): String? {
+internal fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred: List<ActionCard>, deferred: List<ActionCard>, resources: Resources): String? {
     val messages = buildList {
         if (old is ProgressScreen.CurrentAction && new is ProgressScreen.AwaitingNextAction) add(resources.getString(R.string.announce_completed))
         when (new) {
@@ -975,7 +976,9 @@ private fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred: 
                     if (oldCard != null && new.card.origin?.id == oldCard.id) add(resources.getString(R.string.announce_split, oldCard.task))
                     else if (oldCard?.origin?.id == new.card.id) add(resources.getString(R.string.announce_undo))
                     else if ((old as? ProgressScreen.OnHold)?.deferred?.any { it.id == new.card.id } == true) add(resources.getString(R.string.announce_resumed))
-                    else if (oldCard != null && deferred.any { it.id == oldCard.id } && oldDeferred.any { it.id == new.card.id }) add(resources.getString(R.string.announce_resumed_swapped))
+                    else if (oldCard != null && deferred.any { it.id == oldCard.id }) {
+                        add(resources.getString(if (oldDeferred.any { it.id == new.card.id }) R.string.announce_resumed_swapped else R.string.announce_deferred))
+                    }
                     add(resources.getString(R.string.announce_current_action, new.card.task))
                 }
             }
