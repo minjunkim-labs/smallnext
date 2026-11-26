@@ -192,7 +192,7 @@ PR 본문 양식은 `.github/pull_request_template.md` 하나입니다. 대문�
 
 ## 공통 기준
 
-2026-11-08 공개 `minjunkim-labs/repo-baseline`의 새 기준(main `513ac5d`, 코어 + GitHub 프로필)으로 옮겼습니다([repo-baseline#71](https://github.com/minjunkim-labs/repo-baseline/issues/71)). 복사한 검사기, `review/gate`, PR 제목·브랜치·본문 검사는 쓰지 않습니다. `AGENTS.md`와 `REVIEW.md`는 이 저장소가 직접 고칩니다. 다만 PR 양식과 `AGENTS.md`의 ops 블록(`<!-- repo-baseline:ops -->` 표시 줄 사이)은 repo-baseline 동기화([repo-baseline#165](https://github.com/minjunkim-labs/repo-baseline/pull/165))가 `.github/repo-baseline.json`에 해시를 기록하고 맞춥니다. 이 둘은 이 저장소에서 고치지 않고 repo-baseline에서 고칩니다. 규칙의 원문은 repo-baseline의 `POLICY.md`입니다. 2026-11-09 repo-baseline이 코어에서 `CLAUDE.md`를 뺐으므로 이 저장소도 지웠습니다. 이전 기준선의 설명용 `observations` 배열은 2026-11-16에 지웠습니다. 그 내용(`release` Environment 없음, Swift CodeQL 미지원)은 이 문서 위쪽에 있습니다.
+2026-11-26 repo-baseline v2.1.0 코어로 옮겼습니다([repo-baseline#195](https://github.com/minjunkim-labs/repo-baseline/issues/195)). `.baseline/baseline.json`이 판과 관리 파일의 해시를 기록하고, `python3 -I .baseline/baseline.py check`가 Repository hygiene에서 맞는지 봅니다. 관리 파일은 `.baseline/`(`commands.json` 제외), `.claude/hooks/`, `.claude/skills/`의 코어 스킬, `CLAUDE.md`(`@AGENTS.md` 한 줄), PR 양식, `docs/agents/LICENSE`, `docs/agents/ops.md`, `AGENTS.md`·`REVIEW.md`의 `<!-- baseline:start -->` 블록입니다. 이것들은 이 저장소에서 고치지 않고 repo-baseline에서 고칩니다. 블록 밖과 `.baseline/commands.json`은 이 저장소가 고칩니다. `commands.json`을 고치면 `AGENTS.md` 「명령」 칸도 같게 고칩니다. 규칙의 원문은 repo-baseline의 `POLICY.md`입니다. v1 해시 복사본 manifest(`.github/repo-baseline.json`)와 v1 ops 블록은 이때 지웠습니다. 이전 기준선의 설명용 `observations` 배열은 2026-11-16에 지웠습니다. 그 내용(`release` Environment 없음, Swift CodeQL 미지원)은 이 문서 위쪽에 있습니다.
 
 ## 과거 Bugbot 확인 기록
 

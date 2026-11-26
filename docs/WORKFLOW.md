@@ -29,7 +29,7 @@ git switch -c feat/17-goal-split origin/main
 그 외 유형은 Issue 번호가 필요합니다. 구현 범위가 있는 작업은 유형과 무관하게 Issue를 연결합니다.
 
 허용 유형: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`, `revert`.
-자동 생성 브랜치는 `claude/<description>`, `dependabot/<description>`, `office/<과제>`(repo-office 과제)를 허용합니다. 리뷰는 구현과 다른 컨텍스트에서 합니다. 다른 모델 계열이면 좋지만 필수는 아닙니다.
+자동 생성 브랜치는 `claude/<description>`, `dependabot/<description>`를 허용합니다. 리뷰는 구현과 다른 컨텍스트에서 합니다. 다른 모델 계열이면 좋지만 필수는 아닙니다.
 봇 브랜치도 PR 제목, 검증, Issue 연결, 병합 규칙을 따릅니다.
 
 커밋과 PR 제목은 Conventional Commits 형식을 사용합니다.
@@ -101,7 +101,7 @@ P2는 수정하거나 후속 Issue를 연결하고 병합 이유를 기록합니
 3. 미해결 리뷰 대화가 없습니다.
 4. PR에 검증 결과, 미확인 범위, 플래그 상태, 관련 Issue를 기록합니다. Issue를 생략할 수 있는 유지보수 PR은 관련 Issue 대신 생략 이유를 적습니다.
 
-병합은 머지 큐가 squash로 합니다. 리뷰한 head SHA를 지정해 PR을 큐에 넣고, `gh pr merge`와 자동 병합은 쓰지 않습니다. 에이전트가 큐에 넣는 조건은 [`AGENTS.md`](../AGENTS.md)의 「하지 않는 것」에 있습니다.
+병합은 머지 큐가 squash로 합니다. 리뷰한 head SHA를 지정해 PR을 큐에 넣고, `gh pr merge`와 자동 병합은 쓰지 않습니다. 에이전트가 큐에 넣는 조건은 [`AGENTS.md`](../AGENTS.md)의 「병합」과 「하지 않는 것」에 있습니다.
 되돌리기 어려움이거나 [민감한 파일](../REVIEW.md#민감한-파일)을 건드린 변경은 사람이 diff를 읽고 그 최종 head에서 병합합니다. 그 뒤 push가 있으면 다시 읽습니다.
 Draft CD의 배포 쓰기 권한 추가도 최종 head 승인이 필요합니다. 실행 절차는 [Draft CD](DRAFT_RELEASE.md)를 따릅니다.
 같은 저장소의 `main` PR은 큐에 넣기 전에 [독립 집계](CI.md#기준-브랜치의-독립-집계)의 실제 실행 ID도 확인합니다.
