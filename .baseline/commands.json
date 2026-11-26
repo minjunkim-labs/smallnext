@@ -1,0 +1,21 @@
+{
+  "build": [
+    "make",
+    "api-image-build",
+    "api-image-check"
+  ],
+  "check": [
+    "make",
+    "repository-check",
+    "api-spec-check"
+  ],
+  "setup": [
+    "sh",
+    "-c",
+    "mise install && make api-setup"
+  ],
+  "test": [
+    "make",
+    "api-check"
+  ]
+}

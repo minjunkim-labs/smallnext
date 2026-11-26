@@ -1,4 +1,39 @@
 {
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "-I",
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/allow_enqueue.py",
+              "--sha256",
+              "396e325e0de8816ba3a4af5bcc995dcfc49ebf69ca14d58c94054309be3b5d48"
+            ],
+            "command": "python3",
+            "timeout": 15,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "-I",
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/check.py"
+            ],
+            "command": "python3",
+            "timeout": 120,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
   "extraKnownMarketplaces": {
     "mattpocock": {
       "source": {
@@ -12,27 +47,8 @@
     "mattpocock-skills@mattpocock": true
   },
   "permissions": {
-    "deny": [
-      "Read(.env*)",
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(**/.env)",
-      "Read(**/.env.*)",
-      "Read(!.env.example)",
-      "Bash(gh pr merge *)",
-      "Bash(git push * main)",
-      "Bash(git push * *:main)",
-      "Bash(git push * +main)",
-      "Bash(git push *refs/heads/main*)",
-      "Bash(gh api *protection*)",
-      "Bash(gh api *rulesets*)",
-      "Bash(gh repo edit *)",
-      "Bash(gh pr merge)",
-      "Bash(git push)"
-    ],
+    "allow": [],
     "ask": [
-      "Bash(gh api *enqueuePullRequest*)",
-      "Bash(gh api *mergePullRequest*)",
       "Bash(gh api *PullRequestAutoMerge*)",
       "Bash(gh api */merge*)",
       "Bash(gh api *-X*)",
@@ -54,6 +70,54 @@
       "Bash(gh api *Ruleset*)",
       "Bash(gh api *mergeBranch*)",
       "Bash(gh api *Environment*)"
+    ],
+    "deny": [
+      "Read(**/.env*)",
+      "Read(**/.env*/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Bash(git push * main)",
+      "Bash(git push * main *)",
+      "Bash(git push *:main)",
+      "Bash(git push *:main *)",
+      "Bash(git push *refs/heads/main*)",
+      "Bash(git push *--force*)",
+      "Bash(git push *-f)",
+      "Bash(git push *-f *)",
+      "Bash(git push * +*)",
+      "Bash(git push *--mirror*)",
+      "Bash(git push *--all*)",
+      "Bash(git reset *--hard*)",
+      "Bash(git clean *)",
+      "Bash(gh api *protection*)",
+      "Bash(gh api *rulesets*)",
+      "Bash(gh api *hooks*)",
+      "Bash(gh api *collaborators*)",
+      "Bash(gh api *secrets*)",
+      "Bash(gh api *allow_*merge*)",
+      "Bash(gh api *-X DELETE*)",
+      "Bash(gh api *-XDELETE*)",
+      "Bash(gh api *--method DELETE*)",
+      "Bash(gh api *--method=DELETE*)",
+      "Bash(gh secret *)",
+      "Bash(gh repo edit *)",
+      "Bash(gh repo delete *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh api *pulls/*/merge*)",
+      "Bash(gh api *mergePullRequest*)",
+      "Bash(gh api *enqueuePullRequest*)",
+      "Bash(gh api *enablePullRequestAutoMerge*)",
+      "Bash(*baseline.py*github*apply*)",
+      "Read(.env*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(!.env.example)",
+      "Bash(git push * *:main)",
+      "Bash(git push * +main)",
+      "Bash(gh pr merge)",
+      "Bash(git push)"
     ]
   }
 }

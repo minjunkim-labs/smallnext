@@ -28,6 +28,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # repo-baseline v2: managed files, commands.json and the AGENTS.md/REVIEW.md budget.
+      - name: Baseline check
+        run: python3 -I .baseline/baseline.py check
+      - name: Baseline budget
+        run: python3 -I .baseline/baseline.py budget
       - name: Check repository files
         env:
           PYTHONDONTWRITEBYTECODE: "1"
