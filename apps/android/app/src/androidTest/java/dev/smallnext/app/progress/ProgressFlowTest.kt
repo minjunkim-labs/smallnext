@@ -1255,6 +1255,32 @@ class ProgressFlowTest {
         assertNull(flow.card().origin)
     }
 
+    // #428: 되돌린 뒤 원본을 다시 나누면 원본이 다시 `split`이 된다. 그래도 되돌려 보류한 작은 행동은 재개해도 되돌릴 수 없다.
+    @Test
+    fun testResumedUndoneSmallActionHasNoUndoAfterSourceIsSplitAgain() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(smaller), Action(third)))
+        val source = firstCard(flow)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val undone = flow.card()
+        flow.undoSplit()
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val latest = flow.card()
+        assertEquals(third.task, latest.task)
+        assertEquals(source.id, latest.origin?.id)
+
+        flow.resume(undone.id)
+        assertEquals(undone.id, flow.card().id)
+        assertNull(flow.card().origin)
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할은 재개한 뒤에도 되돌릴 수 있다.
+        flow.resume(latest.id)
+        assertEquals(source.id, flow.card().origin?.id)
+        flow.undoSplit()
+        assertEquals(source.id, flow.card().id)
+    }
+
     @Test
     fun testRecordedResultAndNewDraftSurviveDeferAndResume() = runBlocking {
         val flow = makeFlow(ScriptedProvider(Action(first), NoAction))
