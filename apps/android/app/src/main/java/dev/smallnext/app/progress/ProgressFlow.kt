@@ -72,6 +72,9 @@ data class ActionCard(
 
 data class ActionResult(val id: Long, val body: String)
 
+/** 목표 목록의 한 줄이다. 중단한 목표도 담는다. iOS `GoalSummary`와 같다. */
+data class GoalSummary(val id: Long, val statement: String, val isStopped: Boolean, val completedActionCount: Int)
+
 sealed interface SuggestionProblem {
     data class Failure(val failure: SuggestionFailure) : SuggestionProblem
     /** 구조 검사를 통과하지 못했거나 아직 화면이 없는 후보다. */
@@ -100,7 +103,7 @@ sealed interface HoldStatus {
 
 /**
  * iOS `ProgressScreen` 중 이 단계에서 닿는 상태다. 대기 화면의 `problem`이 null이면 제안을 기다리는 중이다.
- * 정보 부족 안내·행동 질문·목표 중단은 해당 티켓(#355, #356)에서 더한다.
+ * 정보 부족 안내·행동 질문은 해당 티켓(#356)에서 더한다.
  */
 sealed interface ProgressScreen {
     data object GoalInput : ProgressScreen
@@ -115,6 +118,12 @@ sealed interface ProgressScreen {
         override val problem: SuggestionProblem? get() = (status as? HoldStatus.Problem)?.problem
     }
 
+    /**
+     * 중단한 목표다. 마지막 행동(현재 행동이 있으면 그 행동, 입력 초안·결과 포함)을 보여주기만 한다.
+     * 이 화면에서는 어떤 명령도 진행 상태를 바꾸지 않는다.
+     */
+    data class StoppedGoal(val card: ActionCard?) : ProgressScreen
+
     /** 실패·중단·취소한 제안의 문제다. '다시 시도'를 보여줄 때만 값이 있다. */
     val problem: SuggestionProblem? get() = null
 }
@@ -126,7 +135,7 @@ val ProgressScreen.isWaitingForSuggestion: Boolean
         is ProgressScreen.AwaitingFirstAction, is ProgressScreen.AwaitingNextAction -> problem == null
         is ProgressScreen.CurrentAction -> smaller == SmallerStatus.Waiting
         is ProgressScreen.OnHold -> status == HoldStatus.Waiting
-        ProgressScreen.GoalInput -> false
+        ProgressScreen.GoalInput, is ProgressScreen.StoppedGoal -> false
     }
 
 data class ProgressState(
@@ -134,11 +143,13 @@ data class ProgressState(
     val goalInput: GoalInput,
     val goal: GoalDetails?,
     val suggestionInput: SuggestionInput? = null,
+    /** 저장한 모든 목표다. 생성 순서다. */
+    val goals: List<GoalSummary> = emptyList(),
 )
 
 class ProgressFlowException(val reason: Reason) : RuntimeException(reason.name) {
     enum class Reason { EMPTY_GOAL, EMPTY_ANSWER, GOAL_INPUT_NOT_ACTIVE, INVALID_GOAL_CONTEXT, GOAL_NOT_READY, GOAL_NOT_FOUND, EMPTY_RESULT, ACTION_NOT_CURRENT,
-        SPLIT_SOURCE_NOT_FOUND, ANSWER_EXCEEDS_REQUEST_LIMIT, DEFERRED_ACTION_NOT_FOUND,
+        SPLIT_SOURCE_NOT_FOUND, ANSWER_EXCEEDS_REQUEST_LIMIT, DEFERRED_ACTION_NOT_FOUND, DELETION_NOT_CONFIRMED,
     }
 }
 
@@ -178,6 +189,90 @@ class ProgressFlow private constructor(
             if (text != saved) updateSuggestionInput(text, input.requestId)
         }
         if (state.value.screen == ProgressScreen.GoalInput && drafts.goalInput != state.value.goalInput) updateGoalInput(drafts.goalInput)
+    }
+
+    /**
+     * 목표 하나를 선택한다. 이전 목표의 대기 요청은 중단하고 늦은 응답은 적용하지 않는다.
+     * 각 목표의 행동·입력 초안·결과·진행 상태와 작성 중인 새 목표 입력은 그대로 남는다.
+     * 같은 목표를 다시 선택해도 그 목표의 제안은 중단하지 않는다. 없는 목표는 [ProgressFlowException]을 던지고 아무것도 바꾸지 않는다.
+     */
+    suspend fun selectGoal(goalId: Long) = serially {
+        if (state.value.goal?.id == goalId) return@serially
+        perform { db ->
+            if (db.long("SELECT EXISTS (SELECT 1 FROM goal WHERE id = ?)", goalId) != 1L) fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
+            db.setMetadata(SELECTED_GOAL_ID, goalId.toString())
+            null
+        }
+        suggestionJob?.cancel()
+    }
+
+    /** 새 목표 입력으로 이동한다. 작성 중인 새 목표 입력은 따로 보존한다. 이전 목표의 대기 요청은 중단한다. */
+    suspend fun startNewGoal() = serially {
+        perform { db ->
+            selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
+            db.update("DELETE FROM app_metadata WHERE `key` = ?", SELECTED_GOAL_ID)
+            null
+        }
+        suggestionJob?.cancel()
+    }
+
+    /**
+     * 선택한 목표의 문구만 고친다. 완료 조건과 행동·입력·완료 기록은 유지한다.
+     * [expectedGoalId]를 주면 화면이 보여 준 목표가 아직 선택한 목표일 때만 고친다. 다르면 아무것도 쓰지 않고 GOAL_NOT_FOUND를 던진다.
+     * 문구가 바뀌었으므로 대기 요청과 답하지 않은 질문은 이전 문구에 대한 것이라 중단한다. 늦은 응답은 적용하지 않는다.
+     */
+    suspend fun editGoalStatement(text: String, expectedGoalId: Long? = null) = serially {
+        val statement = nonempty(text) ?: fail(ProgressFlowException.Reason.EMPTY_GOAL)
+        perform { db ->
+            val goalId = selectedGoalId(db)?.takeIf { expectedGoalId == null || it == expectedGoalId }
+                ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            db.update("UPDATE goal SET statement = ?, updated_at = ? WHERE id = ?", statement, System.currentTimeMillis(), goalId)
+            endPendingRequests(db, goalId, "interrupted")
+            // 확인 중인 목표도 다시 열었을 때 고친 문구로 복구한다.
+            db.string("SELECT value FROM app_metadata WHERE `key` = ?", "$GOAL_INPUT:$goalId")?.let { saved ->
+                val input = gson.fromJson(saved, GoalInput::class.java).copy(statement = statement)
+                db.update("UPDATE app_metadata SET value = ? WHERE `key` = ?", gson.toJson(input), "$GOAL_INPUT:$goalId")
+            }
+            db.update(
+                "UPDATE suggestion_request SET status = 'interrupted' WHERE goal_id = ? AND status = 'applied' AND question IS NOT NULL AND answer IS NULL",
+                goalId,
+            )
+            null
+        }
+        suggestionJob?.cancel()
+    }
+
+    /**
+     * 선택한 목표의 수행을 중단한다. 행동·입력·결과·완료 기록은 보관한다. 대기 요청은 중단하고 늦은 응답은 적용하지 않는다.
+     * [expectedGoalId]는 [editGoalStatement]와 같다. 화면이 보여 준 목표가 아니면 아무것도 쓰지 않는다.
+     */
+    suspend fun stopGoal(expectedGoalId: Long? = null) = serially {
+        perform { db ->
+            val goalId = selectedGoalId(db)?.takeIf { expectedGoalId == null || it == expectedGoalId }
+                ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            db.update("UPDATE goal SET status = 'stopped', updated_at = ? WHERE id = ?", System.currentTimeMillis(), goalId)
+            endPendingRequests(db, goalId, "interrupted")
+            null
+        }
+        suggestionJob?.cancel()
+    }
+
+    /**
+     * 확인한 목표 하나만 삭제한다. 소속 행동·입력·완료·제안 요청은 외래 키로 함께 지운다.
+     * 다른 목표와 작성 중인 새 목표 입력은 남는다. 선택한 목표를 지우면 새 목표 입력으로 이동한다.
+     * [confirmed]가 아니거나 없는 목표이면 [ProgressFlowException]을 던지고 아무것도 지우지 않는다.
+     */
+    suspend fun deleteGoal(goalId: Long, confirmed: Boolean = false) = serially {
+        if (!confirmed) fail(ProgressFlowException.Reason.DELETION_NOT_CONFIRMED)
+        val deletingSelected = state.value.goal?.id == goalId
+        perform { db ->
+            if (db.update("DELETE FROM goal WHERE id = ?", goalId) != 1) fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            db.update("DELETE FROM app_metadata WHERE `key` IN (?, ?)", "$GOAL_INPUT:$goalId", "$SUGGESTION_INPUT:$goalId")
+            if (selectedGoalId(db) == goalId) db.update("DELETE FROM app_metadata WHERE `key` = ?", SELECTED_GOAL_ID)
+            null
+        }
+        if (deletingSelected) suggestionJob?.cancel()
     }
 
     /** 제출하기 전의 입력도 그대로 저장한다. 입력 초안은 확인한 목표가 아니다. */
@@ -735,8 +830,14 @@ class ProgressFlow private constructor(
             val screen = loadScreen(db, goalId)
             return ProgressState(
                 screen, loadGoalInput(db, goalId), goalId?.let { loadGoalDetails(db, it) }, goalId?.let { loadSuggestionInput(db, it, screen) },
+                loadGoals(db),
             )
         }
+
+        private fun loadGoals(db: SupportSQLiteDatabase) = db.query(
+            "SELECT g.id, g.statement, g.status, " +
+                "(SELECT COUNT(*) FROM completion c JOIN action a ON a.id = c.action_id WHERE a.goal_id = g.id) FROM goal g ORDER BY g.id",
+        ) { GoalSummary(it.getLong(0), it.getString(1), it.getString(2) == "stopped", it.getInt(3)) }
 
         /** 확인 질문이나 확인할 완료 조건이 보이는 동안만 초안을 받는다. 행동 질문은 #356에서 더한다. */
         private fun loadSuggestionInput(db: SupportSQLiteDatabase, goalId: Long, screen: ProgressScreen): SuggestionInput? {
@@ -789,9 +890,9 @@ class ProgressFlow private constructor(
 
         private fun loadScreen(db: SupportSQLiteDatabase, goalId: Long?): ProgressScreen {
             goalId ?: return ProgressScreen.GoalInput
-            val (statement, confirmed, proposed) = db.query(
-                "SELECT statement, is_confirmed, proposed_completion_criteria FROM goal WHERE id = ?", goalId,
-            ) { Triple(it.getString(0), it.getInt(1) == 1, it.optString(2)) }.firstOrNull() ?: return ProgressScreen.GoalInput
+            val (statement, confirmed, proposed, stopped) = db.query(
+                "SELECT statement, is_confirmed, proposed_completion_criteria, status = 'stopped' FROM goal WHERE id = ?", goalId,
+            ) { GoalRow(it.getString(0), it.getInt(1) == 1, it.optString(2), it.getInt(3) == 1) }.firstOrNull() ?: return ProgressScreen.GoalInput
             val latest = db.query(
                 "SELECT r.status, r.failure_reason, r.question, r.kind, r.goal_revision = g.revision " +
                     "FROM suggestion_request r JOIN goal g ON g.id = r.goal_id WHERE r.goal_id = ? ORDER BY r.id DESC LIMIT 1",
@@ -800,8 +901,11 @@ class ProgressFlow private constructor(
                 .firstOrNull()
             // 요청이 없으면 이전 상태에 대한 요청처럼 다시 시도를 기다린다.
             val problem = if (latest == null) SuggestionProblem.Interrupted else requestProblem(latest.status, latest.failureReason)
-            if (!confirmed) return ProgressScreen.PreparingGoal(latest?.question, proposed, problem)
-            loadCard(db, goalId)?.let { card ->
+            if (!confirmed) return if (stopped) ProgressScreen.StoppedGoal(null) else ProgressScreen.PreparingGoal(latest?.question, proposed, problem)
+            val card = loadCard(db, goalId)
+            // 중단한 목표는 마지막 행동만 보여준다. 대기 요청이나 보류 목록을 화면 상태로 바꾸지 않는다.
+            if (stopped) return ProgressScreen.StoppedGoal(card)
+            if (card != null) {
                 // 같은 리비전의 더 작게 요청만 현재 행동에 대한 요청이다.
                 val smaller = latest?.takeIf { it.kind == SuggestionKind.SMALLER && it.currentRevision }?.let {
                     when {
@@ -826,6 +930,8 @@ class ProgressFlow private constructor(
             if (hasCompletion(db, goalId)) return ProgressScreen.AwaitingNextAction(problem)
             return ProgressScreen.AwaitingFirstAction(statement, problem)
         }
+
+        private data class GoalRow(val statement: String, val confirmed: Boolean, val proposed: String?, val stopped: Boolean)
 
         private class LatestRequest(
             val status: String, val failureReason: String?, val question: String?, val kind: SuggestionKind?, val currentRevision: Boolean,

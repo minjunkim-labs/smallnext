@@ -18,6 +18,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.hasSetTextAction
@@ -25,6 +26,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -190,7 +192,7 @@ class CoreFlowScreenTest {
         waitForText("보고서 초안이 저장돼 있다")
         assertHeading("목표")
         compose.onNodeWithText("분기 업무 보고서 초안 쓰기").assertIsDisplayed()
-        // 시트는 읽기 전용이다. 입력란은 시트 뒤 카드의 결과 입력란뿐이다.
+        // 문구를 고치기 전에는 시트에 입력란이 없다. 입력란은 시트 뒤 카드의 결과 입력란뿐이다.
         assertEquals(0, compose.onAllNodes(hasSetTextAction() and !hasText("행동 결과 입력")).fetchSemanticsNodes().size)
         // 시스템 뒤로 가기는 시트를 먼저 닫고 진행 상태를 바꾸지 않는다. 시트 창이 다 열려 초점을 받은 뒤에 누른다.
         compose.waitForIdle()
@@ -876,5 +878,325 @@ class CoreFlowScreenTest {
             "보류한 행동을 재개했어요. 하던 행동은 보류로 옮겼어요. 지금 할 행동: ${old.task}",
             announcement(ProgressScreen.CurrentAction(replacement), ProgressScreen.CurrentAction(old), listOf(old), listOf(replacement), resources),
         )
+    }
+
+    // 여러 목표(#355). iOS 대응: ProgressFlowTests의 목표 전환·수정·중단·삭제 사례. 흐름 규칙은 ProgressFlowTest가 확인한다.
+
+    private val third = ProposedAction("제목 한 줄 정하기", "제목이 적혀 있다", 2)
+    private val isHeading = SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading)
+    private val firstGoal = "분기 업무 보고서 초안 쓰기"
+    private val secondGoal = "화분 옮기기"
+
+    private fun ProgressFlow.currentCard() = (state.value.screen as ProgressScreen.CurrentAction).card
+
+    /**
+     * 목표 둘을 만든 흐름이다. 첫째 목표는 행동 [first]를 완료해 [second]가 현재 행동이다.
+     * 둘째 목표 '화분 옮기기'는 현재 행동 [third]이고 선택돼 있다.
+     */
+    private fun flowWithTwoGoals(): ProgressFlow {
+        val flow = flow(goalPreparing(ScriptedProvider(Action(first), Action(second), Action(third))))
+        runBlocking {
+            flow.prepareGoal(GoalInput(firstGoal))
+            flow.awaitSuggestion()
+            flow.confirmGoal(firstGoal)
+            flow.awaitSuggestion()
+            flow.complete(flow.currentCard().id)
+            flow.awaitSuggestion()
+            flow.startNewGoal()
+            flow.prepareGoal(GoalInput(secondGoal))
+            flow.awaitSuggestion()
+            flow.confirmGoal(secondGoal)
+            flow.awaitSuggestion()
+        }
+        return flow
+    }
+
+    private fun goalIds(flow: ProgressFlow) = flow.state.value.goals.map { it.id }
+
+    private fun openGoalList() = compose.onNodeWithText("목표 목록").performScrollTo().clickAfterTyping()
+
+    private fun openGoalView() = compose.onNodeWithText("목표 보기").performScrollTo().clickAfterTyping()
+
+    private fun waitForSheetTitleGone(title: String) =
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText(title) and isHeading).fetchSemanticsNodes().isEmpty() }
+
+    private fun goalRow(statement: String) = compose.onNode(hasText(statement) and hasClickAction())
+
+    private fun pressBack() {
+        // 창이 다 열려 초점을 받은 뒤에 누른다.
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+    }
+
+    // 목표 목록: 각 목표의 '완료한 행동 N개'·선택 표시·중단 상태가 보이고 읽힌다. 행과 버튼은 48dp 이상이다.
+    @Test
+    fun goalListShowsCompletedCountSelectionAndStoppedState() {
+        val flow = flowWithTwoGoals()
+        val firstId = goalIds(flow).first()
+        runBlocking {
+            flow.selectGoal(firstId)
+            flow.stopGoal()
+            flow.selectGoal(goalIds(flow).last())
+        }
+        show(flow)
+        waitForText(third.task)
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onAllNodes(hasText("완료한 행동 1개")).assertCountEquals(1)
+        compose.onAllNodes(hasText("완료한 행동 0개")).assertCountEquals(1)
+        compose.onAllNodes(hasText("진행 중")).assertCountEquals(1)
+        compose.onAllNodes(hasText("목표 중단")).assertCountEquals(1)
+        compose.onAllNodes(hasText("선택한 목표")).assertCountEquals(1)
+        goalRow(secondGoal).assertHeightIsAtLeast(48.dp).assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, true))
+        goalRow(firstGoal).assertHeightIsAtLeast(48.dp).assert(SemanticsMatcher.expectValue(SemanticsProperties.Selected, false))
+        compose.onNodeWithText("새 목표").assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText("닫기").assertHeightIsAtLeast(48.dp)
+    }
+
+    // 목표가 없으면 안내를 보이고, '새 목표'는 시트를 닫는다.
+    @Test
+    fun goalListWithoutGoalsShowsEmptyMessage() {
+        val flow = flow(UnavailableSuggestionProvider)
+        show(flow)
+        assertEquals(0, compose.onAllNodes(hasText("목표 보기")).fetchSemanticsNodes().size)
+        openGoalList()
+        compose.onNodeWithText("저장한 목표가 없어요.").assertIsDisplayed()
+        compose.onNodeWithText("새 목표").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+    }
+
+    // 목록에서 고르면 그 목표의 화면으로 바뀌고 시트가 닫힌다. 각 목표의 결과 입력 초안은 그대로 남는다.
+    @Test
+    fun selectingGoalSwitchesScreenAndKeepsEachGoalsDraft() {
+        val flow = flowWithTwoGoals()
+        show(flow)
+        waitForText(third.task)
+        resultField.performScrollTo().performTextInput("화분 초안")
+        compose.waitUntil(5_000) { flow.currentCard().draft == "화분 초안" }
+        val secondId = goalIds(flow).last()
+
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        goalRow(firstGoal).performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText(second.task)
+        assertAnnounced("지금 할 행동: ${second.task}")
+        assertEquals(goalIds(flow).first(), flow.state.value.goal?.id)
+        assertEquals(0, compose.onAllNodes(hasText("화분 초안") and hasSetTextAction()).fetchSemanticsNodes().size)
+
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        goalRow(secondGoal).performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText(third.task)
+        assertEquals(secondId, flow.state.value.goal?.id)
+        compose.onNode(hasText("화분 초안") and hasSetTextAction()).assertExists()
+    }
+
+    // 새 목표 입력은 목표를 옮겨 다녀도 남는다.
+    @Test
+    fun newGoalInputSurvivesSwitchingGoalsInTheScreen() {
+        val flow = flowWithTwoGoals()
+        show(flow)
+        waitForText(third.task)
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("새 목표").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText("목표를 한 문장으로 적어 주세요.")
+        compose.onNode(hasSetTextAction() and hasText("목표 한 문장")).performTextInput("아직 제출하지 않은 목표")
+        compose.waitUntil(5_000) { flow.state.value.goalInput.statement == "아직 제출하지 않은 목표" }
+
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        goalRow(firstGoal).performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText(second.task)
+
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("새 목표").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText("목표를 한 문장으로 적어 주세요.")
+        compose.onNode(hasSetTextAction() and hasText("아직 제출하지 않은 목표")).assertExists()
+    }
+
+    // TalkBack: 시트 제목과 '목표'·'완료 조건'은 heading이다.
+    @Test
+    fun goalSheetsMarkTitleAndSectionsAsHeadings() {
+        val flow = flowWithTwoGoals()
+        show(flow)
+        waitForText(third.task)
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("닫기").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 보기") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onAllNodes(hasText("목표") and isHeading).assertCountEquals(1)
+        compose.onAllNodes(hasText("완료 조건") and isHeading).assertCountEquals(1)
+        compose.onNodeWithText("목표 중단").assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText("목표 삭제").assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText("문구 수정").assertHeightIsAtLeast(48.dp)
+    }
+
+    // 문구만 고친다. 현재 행동·완료 조건·진행은 그대로다. 빈 문구는 저장할 수 없다.
+    @Test
+    fun goalViewEditsOnlyTheStatement() {
+        val flow = flowWithTwoGoals()
+        show(flow)
+        waitForText(third.task)
+        val before = flow.currentCard()
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("문구 수정")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("문구 수정").performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithText("문구만 고쳐요. 완료 조건과 진행 상태는 유지해요.").assertExists()
+        val field = compose.onNode(hasSetTextAction() and hasText("목표 문구"))
+        field.performTextReplacement("")
+        compose.onNodeWithText("문구 저장").assertIsNotEnabled()
+        field.performTextReplacement("화분을 베란다로 옮기기")
+        compose.onNodeWithText("문구 저장").assertIsEnabled().assertHeightIsAtLeast(48.dp).performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { flow.state.value.goal?.statement == "화분을 베란다로 옮기기" }
+        compose.onNodeWithText("화분을 베란다로 옮기기").assertExists()
+        // 저장하면 수정 모드가 끝나 '문구 수정'이 다시 보인다.
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("문구 수정")).fetchSemanticsNodes().size == 1 }
+        assertEquals(before, flow.currentCard())
+        assertEquals(2L, count("SELECT COUNT(*) FROM goal"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE status = 'current' AND task = '${third.task}'"))
+    }
+
+    // 목표 중단: 안내를 읽어 주고 마지막 행동·결과·입력 초안을 보여준다. 더 진행하는 버튼은 없다. 기록은 남는다.
+    @Test
+    fun stoppingGoalShowsArchivedRecordsAndNoFurtherProgress() {
+        val flow = flowWithTwoGoals()
+        runBlocking {
+            flow.recordResult("보관할 결과", flow.currentCard().id)
+            flow.updateDraft("보관할 초안", flow.currentCard().id)
+        }
+        show(flow)
+        waitForText(third.task)
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 중단") and hasClickAction()).fetchSemanticsNodes().size == 1 }
+        compose.onNode(hasText("목표 중단") and hasClickAction()).performSemanticsAction(SemanticsActions.OnClick)
+        waitForText("진행 상태와 입력·기록을 보관했어요.")
+        waitForSheetTitleGone("목표 보기")
+        assertAnnounced("목표를 중단했어요. 기록은 보관했어요.")
+        assertHeading("목표 중단")
+        compose.onNodeWithText("마지막 행동").assertExists()
+        compose.onNodeWithText(third.task).assertExists()
+        compose.onNodeWithText("보관할 결과").assertExists()
+        compose.onNodeWithText("입력 초안").assertExists()
+        compose.onNodeWithText("보관할 초안").assertExists()
+        for (text in listOf("완료", "더 작게")) compose.onAllNodes(hasText(text) and hasClickAction()).assertCountEquals(0)
+        compose.onAllNodes(hasContentDescription("더 보기")).assertCountEquals(0)
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE body = '보관할 결과' AND NOT is_draft"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE body = '보관할 초안' AND is_draft"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM completion"))
+
+        // 이미 중단했으므로 '목표 보기'에 중단 버튼이 없다.
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 보기") and isHeading).fetchSemanticsNodes().size == 1 }
+        compose.onAllNodes(hasText("목표 중단") and hasClickAction()).assertCountEquals(0)
+    }
+
+    // 삭제는 확인 대화상자를 거친다. 취소하면 아무것도 지우지 않는다. 삭제하면 다른 목표와 새 목표 입력이 남는다.
+    @Test
+    fun deletingGoalAsksConfirmationAndKeepsOtherGoalAndNewInput() {
+        val flow = flowWithTwoGoals()
+        runBlocking {
+            val secondId = goalIds(flow).last()
+            flow.startNewGoal()
+            flow.updateGoalInput(GoalInput("아직 제출하지 않은 목표"))
+            flow.selectGoal(secondId)
+        }
+        show(flow)
+        waitForText(third.task)
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 삭제")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("목표 삭제").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("‘$secondGoal’의 행동·결과·입력·완료 기록을 지워요. 삭제 후에는 복구할 수 없어요.").assertExists()
+        compose.onNodeWithText("삭제").assertHeightIsAtLeast(48.dp)
+        compose.onNode(hasText("취소") and hasClickAction()).assertHeightIsAtLeast(48.dp).performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().isEmpty() }
+        assertEquals(2L, count("SELECT COUNT(*) FROM goal"))
+        assertEquals(third.task, flow.currentCard().task)
+
+        compose.onNodeWithText("목표 삭제").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("삭제").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 보기")
+        waitForText("목표를 한 문장으로 적어 주세요.")
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal"))
+        assertEquals(1, flow.state.value.goals.size)
+        assertEquals(firstGoal, flow.state.value.goals.single().statement)
+        compose.onNode(hasSetTextAction() and hasText("아직 제출하지 않은 목표")).assertExists()
+        // 삭제 뒤 다른 목표를 골라도 '목표 보기'가 저절로 열리지 않는다.
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        goalRow(firstGoal).performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+        waitForText(second.task)
+        compose.onAllNodes(hasText("목표 보기") and isHeading).assertCountEquals(0)
+    }
+
+    // 시스템 뒤로 가기는 대화상자를 먼저, 그다음 시트를 닫는다. 진행 상태는 바뀌지 않는다. 목표 목록 시트도 같다.
+    @Test
+    fun systemBackClosesDialogThenSheetsWithoutChangingProgress() {
+        val flow = flowWithTwoGoals()
+        show(flow)
+        waitForText(third.task)
+        val before = flow.state.value
+        val rows = count("SELECT COUNT(*) FROM goal") to count("SELECT COUNT(*) FROM action")
+
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        pressBack()
+        waitForSheetTitleGone("목표 목록")
+        assertEquals(before, flow.state.value)
+
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 삭제")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("목표 삭제").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().size == 1 }
+        pressBack()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().isEmpty() }
+        // 대화상자만 닫히고 시트는 남는다.
+        compose.onAllNodes(hasText("목표 보기") and isHeading).assertCountEquals(1)
+        assertEquals(before, flow.state.value)
+        pressBack()
+        waitForSheetTitleGone("목표 보기")
+        assertEquals(before, flow.state.value)
+        assertEquals(rows, count("SELECT COUNT(*) FROM goal") to count("SELECT COUNT(*) FROM action"))
+        compose.onNodeWithText(third.task).assertIsDisplayed()
+    }
+
+    // 최대 글꼴: 목록·목표 보기·삭제 확인의 글자가 잘리지 않고 버튼이 48dp 이상이다.
+    @Test
+    fun largestFontKeepsGoalSheetsReadable() {
+        val flow = flowWithTwoGoals()
+        show(flow, fontScale = 2f)
+        waitForText(third.task)
+        openGoalList()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 목록") and isHeading).fetchSemanticsNodes().size == 1 }
+        for (text in listOf("완료한 행동 1개", "선택한 목표", secondGoal)) {
+            compose.onAllNodes(hasText(text), useUnmergedTree = true).onFirst().performScrollTo()
+            assertFullyLaidOut(text, unmerged = true)
+        }
+        compose.onNodeWithText("새 목표").performScrollTo().assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText("닫기").performScrollTo().assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText("닫기").performSemanticsAction(SemanticsActions.OnClick)
+        waitForSheetTitleGone("목표 목록")
+
+        openGoalView()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표 삭제")).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText("목표 삭제").performScrollTo().assertHeightIsAtLeast(48.dp).performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("목표를 삭제할까요?")).fetchSemanticsNodes().size == 1 }
+        val message = "‘$secondGoal’의 행동·결과·입력·완료 기록을 지워요. 삭제 후에는 복구할 수 없어요."
+        compose.onNodeWithText(message).assertExists()
+        assertFullyLaidOut(message, unmerged = true)
+        compose.onNodeWithText("삭제").assertHeightIsAtLeast(48.dp)
     }
 }
