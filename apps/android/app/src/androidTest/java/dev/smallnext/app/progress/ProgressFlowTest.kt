@@ -1980,7 +1980,7 @@ class ProgressFlowTest {
         flow.dismissInformationNotice()
         flow.complete(flow.card().id)
         flow.awaitSuggestion()
-        assertEquals(1, flow.state.value.goals.last().completedActionCount)
+        assertEquals(1, flow.completedCount(goalId))
         assertEquals(
             listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.FIRST_ACTION, SuggestionKind.NEXT_ACTION),
             provider.requests.map { it.kind },
