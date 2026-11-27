@@ -208,12 +208,10 @@ class ProgressFlow private constructor(
      */
     suspend fun selectGoal(goalId: Long) = serially {
         if (state.value.goal?.id == goalId) return@serially
-        perform { db ->
+        perform(resetsDismissal = true) { db ->
             if (db.long("SELECT EXISTS (SELECT 1 FROM goal WHERE id = ?)", goalId) != 1L) fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
             selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
             db.setMetadata(SELECTED_GOAL_ID, goalId.toString())
-            // 상태를 다시 읽기 전에 지워야 옮겨 온 목표의 보존한 안내가 바로 복구된다.
-            dismissedNoticeId = null
             null
         }
         suggestionJob?.cancel()
@@ -221,10 +219,9 @@ class ProgressFlow private constructor(
 
     /** 새 목표 입력으로 이동한다. 작성 중인 새 목표 입력은 따로 보존한다. 이전 목표의 대기 요청은 중단한다. */
     suspend fun startNewGoal() = serially {
-        perform { db ->
+        perform(resetsDismissal = true) { db ->
             selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
             db.update("DELETE FROM app_metadata WHERE `key` = ?", SELECTED_GOAL_ID)
-            dismissedNoticeId = null
             null
         }
         suggestionJob?.cancel()
@@ -610,7 +607,11 @@ class ProgressFlow private constructor(
 
     private suspend fun <T> serially(block: () -> T): T = withContext(serial) { block() }
 
-    private fun perform(command: (SupportSQLiteDatabase) -> PendingSuggestion?) {
+    /**
+     * [resetsDismissal]이면 목표를 옮기는 명령이다. 닫은 안내를 숨기지 않고 상태를 읽고, 커밋에 성공한 뒤에만 닫힘 상태를 지운다.
+     * 그래야 옮겨 온 목표의 보존한 안내가 바로 복구되고, 쓰기에 실패하면 닫힘 상태가 그대로 남는다.
+     */
+    private fun perform(resetsDismissal: Boolean = false, command: (SupportSQLiteDatabase) -> PendingSuggestion?) {
         val failedId = unsavedSuggestionId
         val (pending, state) = database.write { db ->
             failedId?.let {
@@ -619,8 +620,9 @@ class ProgressFlow private constructor(
                     SuggestionFailure.FAILED.raw, it,
                 )
             }
-            command(db) to loadState(db, dismissedNoticeId)
+            command(db) to loadState(db, if (resetsDismissal) null else dismissedNoticeId)
         }
+        if (resetsDismissal) dismissedNoticeId = null
         unsavedSuggestionId = null
         _state.value = state
         pending?.let(::start)

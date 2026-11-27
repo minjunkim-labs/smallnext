@@ -1943,7 +1943,7 @@ class ProgressFlowTest {
 
     @Test
     fun testSmallerNoticeReturnsToPreservedActionAndKeepsDraftThroughCommands() = runBlocking {
-        val provider = ScriptedProvider(Action(first), InsufficientInfo(InsufficientInfoFixture.REASON), Action(second))
+        val provider = ScriptedProvider(Action(first), InsufficientInfo(InsufficientInfoFixture.REASON), Action(second), Action(third))
         val flow = makeFlow(provider)
         startGoal(flow, "경력 정리")
         flow.awaitSuggestion()
@@ -1969,10 +1969,22 @@ class ProgressFlowTest {
         flow.selectGoal(goalId)
         assertEquals(notice, flow.state.value.screen)
         flow.dismissInformationNotice()
+        assertEquals(original, flow.state.value.screen)
+        // 새 목표 입력을 거치지 않고 다른 목표로 바로 옮겼다 돌아와도 닫은 안내가 다시 보인다.
+        startAnotherGoal(flow, "다른 경력 정리")
+        flow.awaitSuggestion()
+        val otherId = flow.goalId()
+        assertTrue(otherId != goalId)
+        flow.selectGoal(goalId)
+        assertEquals(notice, flow.state.value.screen)
+        flow.dismissInformationNotice()
         flow.complete(flow.card().id)
         flow.awaitSuggestion()
         assertEquals(1, flow.state.value.goals.last().completedActionCount)
-        assertEquals(listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.NEXT_ACTION), provider.requests.map { it.kind })
+        assertEquals(
+            listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.FIRST_ACTION, SuggestionKind.NEXT_ACTION),
+            provider.requests.map { it.kind },
+        )
     }
 
     // iOS에는 없는 확인이다. 닫기는 더 작게 요청의 안내에만 있고, 다른 종류의 안내는 닫아도 화면과 안내가 그대로다.
