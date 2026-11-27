@@ -1970,11 +1970,18 @@ class ProgressFlowTest {
         assertEquals(notice, flow.state.value.screen)
         flow.dismissInformationNotice()
         assertEquals(restored, flow.state.value.screen)
-        // 새 목표 입력을 거치지 않고 다른 목표로 바로 옮겼다 돌아와도 닫은 안내가 다시 보인다.
+        // 다른 목표를 만들었다 돌아와도 닫은 안내가 다시 보인다.
         startAnotherGoal(flow, "다른 경력 정리")
         flow.awaitSuggestion()
         val otherId = flow.goalId()
         assertTrue(otherId != goalId)
+        flow.selectGoal(goalId)
+        assertEquals(notice, flow.state.value.screen)
+        flow.dismissInformationNotice()
+        assertEquals(restored, flow.state.value.screen)
+        // selectGoal만으로도 닫은 상태가 풀린다. 닫은 뒤 다른 목표로 갔다가 돌아오면 안내가 다시 보인다.
+        flow.selectGoal(otherId)
+        assertEquals(otherId, flow.goalId())
         flow.selectGoal(goalId)
         assertEquals(notice, flow.state.value.screen)
         flow.dismissInformationNotice()
