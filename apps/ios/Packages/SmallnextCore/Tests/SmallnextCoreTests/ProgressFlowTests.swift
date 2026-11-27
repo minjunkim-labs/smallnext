@@ -2482,6 +2482,34 @@ final class ProgressFlowTests: XCTestCase {
         XCTAssertNil(resumed.origin)
     }
 
+    /// #428: 되돌린 뒤 원본을 다시 나누면 원본이 다시 `split`이 된다. 그래도 되돌려 보류한 작은 행동은 재개해도 되돌릴 수 없다.
+    func testResumedUndoneSmallActionHasNoUndoAfterSourceIsSplitAgain() async throws {
+        let flow = try makeFlow(ScriptedProvider([.action(first), .action(smaller), .action(third)]))
+        let source = try await firstCard(flow)
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let undone, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        try flow.undoSplit()
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let latest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(latest.task, third.task)
+        XCTAssertEqual(latest.origin?.id, source.id)
+
+        try flow.resume(undone.id)
+        guard case .currentAction(let resumed, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(resumed.id, undone.id)
+        XCTAssertNil(resumed.origin)
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할은 재개한 뒤에도 되돌릴 수 있다.
+        try flow.resume(latest.id)
+        guard case .currentAction(let resumedLatest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(resumedLatest.origin?.id, source.id)
+        try flow.undoSplit()
+        guard case .currentAction(let restored, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(restored.id, source.id)
+    }
+
     func testDraftAutosavesAndSurvivesReopenWithoutBecomingResult() async throws {
         let flow = try makeFlow(ScriptedProvider([.action(first)]))
         let card = try await firstCard(flow)

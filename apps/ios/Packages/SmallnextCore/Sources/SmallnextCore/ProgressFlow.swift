@@ -1204,6 +1204,7 @@ public final class ProgressFlow {
                    a.split_from_id, p.task AS source_task, g.revision
             FROM action a JOIN goal g ON g.id = a.goal_id
             LEFT JOIN action p ON p.id = a.split_from_id AND p.status = 'split'
+                AND NOT EXISTS (SELECT 1 FROM action n WHERE n.split_from_id = p.id AND n.id > a.id)
             WHERE a.goal_id = ? AND a.status = 'current'
             """,
             arguments: [goalID]
@@ -1213,7 +1214,8 @@ public final class ProgressFlow {
                 task: row["task"],
                 doneWhen: row["done_when"],
                 estimatedMinutes: row["estimated_minutes"],
-                // 분할 원본이 `split`일 때만 되돌릴 수 있다. 보류·완료한 원본은 관계에서 뺀다.
+                // 분할 원본이 `split`이고 이 행동이 원본의 가장 최근 분할일 때만 되돌릴 수 있다. 보류·완료한 원본과,
+                // 되돌린 뒤 원본이 다시 나뉘어 더 새로운 작은 행동이 생긴 오래된 작은 행동은 관계에서 뺀다.
                 origin: (row["source_task"] as String?).map { ActionCard.Origin(id: row["split_from_id"], task: $0) },
                 draft: try String.fetchOne(db, sql: "SELECT body FROM action_note WHERE action_id = ? AND is_draft", arguments: [row["id"] as Int64]) ?? "",
                 results: try Row.fetchAll(db, sql: "SELECT id, body FROM action_note WHERE action_id = ? AND NOT is_draft ORDER BY id",
