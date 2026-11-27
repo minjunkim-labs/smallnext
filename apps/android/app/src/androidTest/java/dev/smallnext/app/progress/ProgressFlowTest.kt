@@ -1289,4 +1289,433 @@ class ProgressFlowTest {
         assertEquals(current(replacement), flow.state.value.screen)
         assertEquals(2, provider.requests.size)
     }
+
+    // 여러 목표: 목록·전환·문구 수정·중단·삭제(#355). 이름은 iOS `ProgressFlowTests`와 같다.
+
+    /** 사용자 경로로 새 목표를 시작해 완료 조건까지 확인한다. 첫 행동 요청이 시작된 상태로 끝난다. */
+    private suspend fun startAnotherGoal(flow: ProgressFlow, statement: String) {
+        flow.startNewGoal()
+        startGoal(flow, statement)
+    }
+
+    private fun ProgressFlow.goalId() = state.value.goal!!.id
+
+    private fun ProgressFlow.completedCount(goalId: Long) = state.value.goals.first { it.id == goalId }.completedActionCount
+
+    @Test
+    fun testSwitchingGoalsPreservesActionsDraftsResultsAndSelection() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(second), Action(third)))
+        startGoal(flow, "학습 자료 정리")
+        flow.awaitSuggestion()
+        val firstGoal = flow.goalId()
+        val card = flow.card()
+        flow.recordResult("첫 자료 확인", card.id)
+        flow.complete(card.id)
+        flow.awaitSuggestion()
+        val next = flow.card()
+        flow.updateDraft("학습 목표 초안", next.id)
+        val firstScreen = flow.state.value.screen
+        startAnotherGoal(flow, "화분 옮기기")
+        flow.awaitSuggestion()
+        val secondGoal = flow.goalId()
+        flow.updateDraft("화분 목표 초안", flow.card().id)
+        val secondScreen = flow.state.value.screen
+        flow.selectGoal(firstGoal)
+        assertEquals(firstScreen, flow.state.value.screen)
+        assertEquals(1, flow.completedCount(firstGoal))
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider)
+        assertEquals(firstGoal, reopened.goalId())
+        assertEquals(firstScreen, reopened.state.value.screen)
+        reopened.selectGoal(secondGoal)
+        assertEquals(secondScreen, reopened.state.value.screen)
+        assertEquals(2, reopened.state.value.goals.size)
+    }
+
+    @Test
+    fun testNewGoalInputSurvivesSwitchingAndConfirmationOfAnotherGoal() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(GoalSummary("학습을 끝냈다"), Action(first)), preparing = false)
+        val input = GoalInput(statement = "학습하기", currentState = "첫 단원 선택")
+        flow.updateGoalInput(input)
+        flow.prepareGoal()
+        flow.awaitSuggestion()
+        val goalId = flow.goalId()
+        flow.startNewGoal()
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertEquals(GoalInput(), flow.state.value.goalInput)
+        val newInput = GoalInput(statement = "화분 옮기기", blocker = "흙이 없다")
+        flow.updateGoalInput(newInput)
+        flow.selectGoal(goalId)
+        assertEquals(input, flow.state.value.goalInput)
+        flow.confirmGoal("첫 단원을 설명한다")
+        flow.awaitSuggestion()
+        flow.startNewGoal()
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider, preparing = false)
+        assertEquals(ProgressScreen.GoalInput, reopened.state.value.screen)
+        assertEquals(newInput, reopened.state.value.goalInput)
+        assertEquals(1, reopened.state.value.goals.size)
+    }
+
+    @Test
+    fun testGoalStatementEditKeepsProgressAndRejectsLateSuggestion() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        startGoal(seed, "메모 정리")
+        seed.awaitSuggestion()
+        seed.complete(seed.card().id)
+        seed.awaitSuggestion()
+        val card = seed.card()
+        seed.recordResult("이미 남긴 결과", card.id)
+        seed.updateDraft("작성 중", card.id)
+        closeAll()
+        val held = HeldProvider(Action(third))
+        val flow = makeFlow(held)
+        flow.makeSmaller()
+        awaitRequest(held.requests)
+        val error = failure { flow.editGoalStatement(" \n ") }
+        assertEquals(ProgressFlowException.Reason.EMPTY_GOAL, (error as ProgressFlowException).reason)
+        flow.editGoalStatement("  학습 메모 정리  ")
+        held.release()
+        flow.awaitSuggestion()
+        val screen = flow.state.value.screen as ProgressScreen.CurrentAction
+        assertEquals(SmallerStatus.Problem(SuggestionProblem.Interrupted), screen.smaller)
+        assertEquals(card.id, screen.card.id)
+        assertEquals("작성 중", screen.card.draft)
+        assertEquals(listOf("이미 남긴 결과"), screen.card.results.map { it.body })
+        assertEquals(1, flow.state.value.goals.first().completedActionCount)
+        assertEquals("학습 메모 정리", flow.state.value.goal?.statement)
+        assertEquals(0L, count("SELECT COUNT(*) FROM action WHERE task = '${third.task}'"))
+        closeAll()
+        assertEquals(screen, makeFlow(UnavailableSuggestionProvider).state.value.screen)
+    }
+
+    @Test
+    fun testSwitchingGoalsInterruptsPreviousRequestWithoutApplyingLateResponse() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        startGoal(seed, "학습")
+        seed.awaitSuggestion()
+        val firstId = seed.goalId()
+        startAnotherGoal(seed, "화분")
+        seed.awaitSuggestion()
+        val secondId = seed.goalId()
+        val secondScreen = seed.state.value.screen
+        closeAll()
+        val held = HeldProvider(Action(third))
+        val flow = makeFlow(held)
+        flow.selectGoal(firstId)
+        flow.complete(flow.card().id)
+        awaitRequest(held.requests)
+        flow.selectGoal(secondId)
+        held.release()
+        flow.awaitSuggestion()
+        assertEquals(secondScreen, flow.state.value.screen)
+        flow.selectGoal(firstId)
+        assertEquals(ProgressScreen.AwaitingNextAction(SuggestionProblem.Interrupted), flow.state.value.screen)
+        assertEquals(1, flow.completedCount(firstId))
+        assertEquals(0L, count("SELECT COUNT(*) FROM action WHERE task = '${third.task}'"))
+    }
+
+    @Test
+    fun testStoppingGoalKeepsRecordsAndPreventsLateResponseAndFurtherProgress() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        startGoal(seed, "학습 자료 정리")
+        seed.awaitSuggestion()
+        seed.complete(seed.card().id)
+        seed.awaitSuggestion()
+        val card = seed.card()
+        seed.recordResult("보관할 결과", card.id)
+        seed.updateDraft("보관할 초안", card.id)
+        closeAll()
+        val held = HeldProvider(Action(third))
+        val flow = makeFlow(held)
+        flow.makeSmaller()
+        awaitRequest(held.requests)
+        flow.stopGoal()
+        held.release()
+        flow.awaitSuggestion()
+        val saved = (flow.state.value.screen as ProgressScreen.StoppedGoal).card
+        assertEquals(card.id, saved?.id)
+        assertEquals("보관할 초안", saved?.draft)
+        assertEquals(listOf("보관할 결과"), saved?.results?.map { it.body })
+        assertEquals(1, flow.state.value.goals.first().completedActionCount)
+        assertTrue(flow.state.value.goals.first().isStopped)
+        val stopped = flow.state.value.screen
+        flow.complete(card.id)
+        flow.retrySuggestion()
+        flow.makeSmaller()
+        assertEquals(stopped, flow.state.value.screen)
+        assertEquals(0L, count("SELECT COUNT(*) FROM action WHERE task = '${third.task}'"))
+        closeAll()
+        assertEquals(stopped, makeFlow(UnavailableSuggestionProvider).state.value.screen)
+    }
+
+    @Test
+    fun testDeletingGoalRequiresConfirmationAndPreservesOtherGoalAndNewInput() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        seed.prepareGoal(GoalInput("삭제할 목표"))
+        seed.awaitSuggestion()
+        val deletedId = seed.goalId()
+        seed.confirmGoal("자료가 정리됐다")
+        seed.awaitSuggestion()
+        startAnotherGoal(seed, "보관할 목표")
+        seed.awaitSuggestion()
+        val keptId = seed.goalId()
+        val keptCard = seed.card()
+        seed.recordResult("다른 목표의 결과", keptCard.id)
+        seed.updateDraft("다른 목표의 초안", keptCard.id)
+        val keptScreen = seed.state.value.screen
+        seed.startNewGoal()
+        val newInput = GoalInput(statement = "아직 제출하지 않은 목표")
+        seed.updateGoalInput(newInput)
+        closeAll()
+        val held = HeldProvider(Action(third))
+        val flow = makeFlow(held, preparing = false)
+        flow.selectGoal(deletedId)
+        flow.complete(flow.card().id)
+        awaitRequest(held.requests)
+        val unconfirmed = failure { flow.deleteGoal(deletedId) }
+        assertEquals(ProgressFlowException.Reason.DELETION_NOT_CONFIRMED, (unconfirmed as ProgressFlowException).reason)
+        assertTrue(flow.state.value.screen.isWaitingForSuggestion)
+        assertEquals(2, flow.state.value.goals.size)
+        flow.deleteGoal(deletedId, confirmed = true)
+        held.release()
+        flow.awaitSuggestion()
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertEquals(newInput, flow.state.value.goalInput)
+        assertEquals(listOf(keptId), flow.state.value.goals.map { it.id })
+        assertEquals(ProgressFlowException.Reason.GOAL_NOT_FOUND, (failure { flow.selectGoal(deletedId) } as ProgressFlowException).reason)
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider, preparing = false)
+        assertTrue(failure { reopened.selectGoal(deletedId) } is ProgressFlowException)
+        reopened.selectGoal(keptId)
+        assertEquals(keptScreen, reopened.state.value.screen)
+    }
+
+    @Test
+    fun testFailedGoalChangesKeepSelectionRecordsAndLiveRequest() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        startGoal(seed, "수정 실패 시 보관할 목표")
+        seed.awaitSuggestion()
+        val goalId = seed.goalId()
+        startAnotherGoal(seed, "다른 목표")
+        seed.awaitSuggestion()
+        closeAll()
+        val held = HeldProvider(Action(third))
+        val flow = makeFlow(held)
+        flow.selectGoal(goalId)
+        flow.complete(flow.card().id)
+        awaitRequest(held.requests)
+        val before = flow.state.value.screen
+        val goals = flow.state.value.goals
+        probe.execSQL("CREATE TRIGGER reject_goal_update BEFORE UPDATE ON goal BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        probe.execSQL(
+            "CREATE TRIGGER reject_selection_delete BEFORE DELETE ON app_metadata WHEN OLD.`key` = 'selected_goal_id' " +
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+        )
+        assertEquals(ProgressFlowException.Reason.GOAL_NOT_FOUND, (failure { flow.selectGoal(-1) } as ProgressFlowException).reason)
+        assertTrue(failure { flow.editGoalStatement("적용하면 안 되는 문구") } is SQLiteException)
+        assertTrue(failure { flow.stopGoal() } is SQLiteException)
+        assertTrue(failure { flow.deleteGoal(goalId, confirmed = true) } is SQLiteException)
+        assertTrue(failure { flow.startNewGoal() } is SQLiteException)
+        assertEquals(before, flow.state.value.screen)
+        assertEquals(goals, flow.state.value.goals)
+        assertEquals(goalId, flow.goalId())
+        probe.execSQL("DROP TRIGGER reject_goal_update")
+        probe.execSQL("DROP TRIGGER reject_selection_delete")
+        held.release()
+        flow.awaitSuggestion()
+        assertEquals(third.task, flow.card().task)
+        assertEquals(1, flow.completedCount(goalId))
+        closeAll()
+        assertEquals(flow.state.value.screen, makeFlow(UnavailableSuggestionProvider).state.value.screen)
+    }
+
+    @Test
+    fun testDeletingUnconfirmedGoalKeepsNewDraftAndRejectsLateSummary() = runBlocking {
+        val held = HeldProvider(GoalSummary("삭제한 목표의 요약"))
+        val flow = makeFlow(held, preparing = false)
+        flow.updateGoalInput(GoalInput(statement = "삭제할 입력", materialExcerpt = "삭제할 발췌"))
+        flow.prepareGoal()
+        awaitRequest(held.requests)
+        val goalId = flow.goalId()
+        flow.startNewGoal()
+        val draft = GoalInput(statement = "보관할 새 입력")
+        flow.updateGoalInput(draft)
+        flow.deleteGoal(goalId, confirmed = true)
+        held.release()
+        flow.awaitSuggestion()
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider, preparing = false)
+        assertEquals(ProgressScreen.GoalInput, reopened.state.value.screen)
+        assertEquals(draft, reopened.state.value.goalInput)
+        assertTrue(reopened.state.value.goals.isEmpty())
+        assertTrue(failure { reopened.selectGoal(goalId) } is ProgressFlowException)
+    }
+
+    @Test
+    fun testSuggestionInputDraftsSurviveGoalSwitchAndReopenAndRejectStaleInput() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Question("어떤 자료인가요?"), GoalSummary("자료를 정리했다")), preparing = false)
+        flow.prepareGoal(GoalInput("학습 자료 정리"))
+        flow.awaitSuggestion()
+        val firstId = flow.goalId()
+        val firstRequest = flow.state.value.suggestionInput!!.requestId
+        flow.updateSuggestionInput("질문 답을 작성 중", firstRequest)
+        flow.startNewGoal()
+        flow.prepareGoal(GoalInput("화분 옮기기"))
+        flow.awaitSuggestion()
+        val secondId = flow.goalId()
+        val secondRequest = flow.state.value.suggestionInput!!.requestId
+        flow.updateSuggestionInput("화분이 새 자리에 있다", secondRequest)
+        assertTrue(failure { flow.updateSuggestionInput("다른 질문의 늦은 입력", firstRequest) } is ProgressFlowException)
+        flow.selectGoal(firstId)
+        closeAll()
+        val reopened = makeFlow(ScriptedProvider(Action(first)))
+        assertEquals("질문 답을 작성 중", reopened.state.value.suggestionInput?.text)
+        reopened.selectGoal(secondId)
+        assertEquals("화분이 새 자리에 있다", reopened.state.value.suggestionInput?.text)
+        reopened.confirmGoal("화분이 새 자리에 있다")
+        reopened.awaitSuggestion()
+        assertNull(reopened.state.value.suggestionInput)
+        assertTrue(failure { reopened.updateSuggestionInput("이전 완료 조건", secondRequest) } is ProgressFlowException)
+        assertEquals("화분이 새 자리에 있다", reopened.state.value.goal?.completionCriteria)
+    }
+
+    // iOS에는 없는 확인이다. 목표를 지우면 외래 키로 그 목표의 기록이 함께 지워지고 다른 목표의 기록과 입력 초안 키는 남는다.
+    @Test
+    fun testDeletingGoalRemovesItsRecordsAndMetadataButKeepsOtherGoalRecords() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(second), Action(third)))
+        startGoal(flow, "삭제할 목표")
+        flow.awaitSuggestion()
+        flow.recordResult("지울 결과", flow.card().id)
+        flow.complete(flow.card().id)
+        flow.awaitSuggestion()
+        flow.updateDraft("지울 초안", flow.card().id)
+        val deletedId = flow.goalId()
+        startAnotherGoal(flow, "보관할 목표")
+        flow.awaitSuggestion()
+        val keptId = flow.goalId()
+        flow.recordResult("보관할 결과", flow.card().id)
+        probe.execSQL("INSERT INTO app_metadata (`key`, value) VALUES ('suggestion_input:$deletedId', '지울 답')")
+        probe.execSQL("INSERT INTO app_metadata (`key`, value) VALUES ('goal_input:$deletedId', '{}')")
+        probe.execSQL("INSERT INTO app_metadata (`key`, value) VALUES ('suggestion_input:$keptId', '보관할 답')")
+        assertEquals(1L, count("SELECT COUNT(*) FROM completion"))
+
+        flow.selectGoal(deletedId)
+        flow.deleteGoal(deletedId, confirmed = true)
+
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertEquals(0L, count("SELECT COUNT(*) FROM goal WHERE id = $deletedId"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM action WHERE goal_id = $deletedId"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM action_note WHERE body IN ('지울 결과', '지울 초안')"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request WHERE goal_id = $deletedId"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` IN ('suggestion_input:$deletedId', 'goal_input:$deletedId')"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE id = $keptId"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE goal_id = $keptId"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE body = '보관할 결과'"))
+        assertTrue(count("SELECT COUNT(*) FROM suggestion_request WHERE goal_id = $keptId") > 0)
+        assertEquals(1L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` = 'suggestion_input:$keptId'"))
+    }
+
+    // iOS에는 없는 확인이다. 중단한 목표는 어떤 명령으로도 진행 상태가 바뀌지 않고, 다시 열거나 다른 목표를 다녀와도 중단이다.
+    @Test
+    fun testStoppedGoalIgnoresEveryProgressCommandAndStaysStoppedAfterReopenAndSwitching() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(second), Action(third))
+        val flow = makeFlow(provider)
+        firstCard(flow)
+        flow.deferAction()
+        flow.awaitSuggestion()
+        val card = flow.card()
+        val deferredId = flow.state.value.goal!!.deferredActions.single().id
+        val stoppedId = flow.goalId()
+        flow.stopGoal()
+        val before = flow.state.value
+        assertEquals(ProgressScreen.StoppedGoal(card), before.screen)
+
+        flow.complete(card.id)
+        flow.makeSmaller(card.id)
+        flow.undoSplit(card.id)
+        flow.deferAction(card.id)
+        flow.resume(deferredId)
+        flow.retrySuggestion()
+        flow.cancelSuggestion()
+        flow.answerQuestion("답")
+        for (command in listOf<suspend () -> Unit>({ flow.updateDraft("초안", card.id) }, { flow.recordResult("결과", card.id) })) {
+            assertEquals(ProgressFlowException.Reason.ACTION_NOT_CURRENT, (failure(command) as ProgressFlowException).reason)
+        }
+        assertEquals(before, flow.state.value)
+        assertEquals(2, provider.requests.size)
+
+        closeAll()
+        val reopened = makeFlow(ScriptedProvider(Action(third)))
+        assertEquals(before.screen, reopened.state.value.screen)
+        startAnotherGoal(reopened, "다른 목표")
+        reopened.awaitSuggestion()
+        reopened.selectGoal(stoppedId)
+        assertEquals(before.screen, reopened.state.value.screen)
+        assertTrue(reopened.state.value.goals.first { it.id == stoppedId }.isStopped)
+    }
+
+    // 확인하기 전에 중단한 목표도 중단 화면이다. 완료 조건을 확인해 시작할 수 없다.
+    @Test
+    fun testStoppingUnconfirmedGoalShowsStoppedGoalWithoutCard() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(GoalSummary("메모를 정리했다"), Action(first)), preparing = false)
+        flow.prepareGoal(GoalInput("메모 정리"))
+        flow.awaitSuggestion()
+        flow.stopGoal()
+        assertEquals(ProgressScreen.StoppedGoal(null), flow.state.value.screen)
+        assertTrue(failure { flow.confirmGoal("메모가 정리돼 있다") } is ProgressFlowException)
+        flow.retrySuggestion()
+        assertEquals(ProgressScreen.StoppedGoal(null), flow.state.value.screen)
+        assertEquals(0L, count("SELECT COUNT(*) FROM action"))
+        closeAll()
+        assertEquals(ProgressScreen.StoppedGoal(null), makeFlow(UnavailableSuggestionProvider, preparing = false).state.value.screen)
+    }
+
+    // 같은 목표를 다시 선택해도 그 목표의 대기 요청은 중단하지 않는다.
+    @Test
+    fun testSelectingTheSelectedGoalKeepsItsPendingRequest() = runBlocking {
+        val held = HeldProvider(Action(first))
+        val flow = makeFlow(held)
+        startGoal(flow, "방 한 칸 정리하기")
+        awaitRequest(held.requests)
+        flow.selectGoal(flow.goalId())
+        assertTrue(flow.state.value.screen.isWaitingForSuggestion)
+        held.release()
+        flow.awaitSuggestion()
+        assertEquals(first.task, flow.card().task)
+    }
+
+    // 확인 중인 목표의 문구를 고치면 다시 열었을 때도 고친 문구로 복구하고, 답하지 않은 질문은 이전 문구에 대한 것이라 중단한다.
+    @Test
+    fun testEditingGoalUnderReviewKeepsSavedInputAndInterruptsUnansweredQuestion() = runBlocking {
+        val question = "무엇을 정리하려고 하나요?"
+        val flow = makeFlow(ScriptedProvider(Question(question)), preparing = false)
+        flow.prepareGoal(GoalInput("정리하기", currentState = "시작 전"))
+        flow.awaitSuggestion()
+        assertEquals(ProgressScreen.PreparingGoal(question, null, null), flow.state.value.screen)
+        flow.editGoalStatement(" 책상 정리하기 ")
+        assertEquals(ProgressScreen.PreparingGoal(question, null, SuggestionProblem.Interrupted), flow.state.value.screen)
+        assertEquals("책상 정리하기", flow.state.value.goal?.statement)
+        assertEquals("시작 전", flow.state.value.goal?.context?.currentState)
+        closeAll()
+        val reopened = makeFlow(UnavailableSuggestionProvider, preparing = false)
+        assertEquals(GoalInput("책상 정리하기", currentState = "시작 전"), reopened.state.value.goalInput)
+        assertEquals(ProgressScreen.PreparingGoal(question, null, SuggestionProblem.Interrupted), reopened.state.value.screen)
+    }
+
+    @Test
+    fun testDeletingUnknownGoalOrWithoutConfirmationChangesNothing() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first)))
+        firstCard(flow)
+        val goalId = flow.goalId()
+        val before = flow.state.value
+        val unknown = failure { flow.deleteGoal(999_999, confirmed = true) }
+        assertEquals(ProgressFlowException.Reason.GOAL_NOT_FOUND, (unknown as ProgressFlowException).reason)
+        val unconfirmed = failure { flow.deleteGoal(goalId) }
+        assertEquals(ProgressFlowException.Reason.DELETION_NOT_CONFIRMED, (unconfirmed as ProgressFlowException).reason)
+        assertEquals(before, flow.state.value)
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE goal_id = $goalId"))
+    }
 }

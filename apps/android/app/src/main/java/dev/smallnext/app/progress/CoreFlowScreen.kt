@@ -34,10 +34,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -87,6 +90,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.collapse
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.expand
@@ -181,6 +185,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val scope = rememberCoroutineScope()
     var storageFailed by remember { mutableStateOf(false) }
     var showingGoal by rememberSaveable { mutableStateOf(false) }
+    var showingGoals by rememberSaveable { mutableStateOf(false) }
     var announcement by remember { mutableStateOf("") }
     var shown by remember { mutableStateOf(state.screen) }
     var shownDeferred by remember { mutableStateOf(state.goal?.deferredActions.orEmpty()) }
@@ -291,6 +296,8 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val defer = { actionId: Long -> cardCommand(actionId) { flow.deferAction(actionId) } }
     // 현재 행동이 있으면 그 행동이 보류로 가므로 '완료'처럼 그 카드의 초안을 먼저 저장한다.
     val resume = { actionId: Long -> currentCardId?.let { id -> cardCommand(id) { flow.resume(actionId) } } ?: run { flow.resume(actionId) } }
+    // 목표를 옮기거나 중단하면 지금 보이는 카드를 떠난다. '완료'처럼 그 카드의 저장하지 못한 초안을 먼저 저장하고, 실패하면 명령을 실행하지 않는다.
+    val goalCommand = { command: suspend () -> Unit -> currentCardId?.let { id -> cardCommand(id, command) } ?: run(command) }
     val cancel = { run(flow::cancelSuggestion) }
     Scaffold(
         bottomBar = {
@@ -322,7 +329,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                 .verticalScroll(scroll).padding(24.dp),
             Arrangement.spacedBy(24.dp),
         ) {
-            Header(largeText, state.goal != null) { showingGoal = true }
+            Header(largeText, state.goal != null, { showingGoals = true }) { showingGoal = true }
             // 상태별 화면을 위쪽에 맞춰 교체한다. 이동 없이 투명도 전환만 쓴다.
             AnimatedContent(
                 screen,
@@ -366,6 +373,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                         SuggestionStatus(R.string.preparing_next_action, target.problem, flow, run)
                     }
                     is ProgressScreen.OnHold -> OnHoldContent(target, flow, run, resume)
+                    is ProgressScreen.StoppedGoal -> StoppedGoalContent(target.card)
                 }
             }
             if (storageFailed && !pinned) StorageFailure()
@@ -373,34 +381,172 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
         }
     }
     val goal = state.goal
+    // 선택한 목표를 지우면 '목표 보기'를 닫는다. 닫지 않으면 다른 목표를 고를 때 시트가 다시 열린다.
+    LaunchedEffect(goal == null) { if (goal == null) showingGoal = false }
+    if (showingGoals) {
+        GoalListSheet(
+            state,
+            storageFailed,
+            onDismiss = { showingGoals = false },
+            select = { id -> goalCommand { flow.selectGoal(id); showingGoals = false } },
+            startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
+        )
+    }
     if (showingGoal && goal != null) {
-        ModalBottomSheet(onDismissRequest = { showingGoal = false }) {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
-                Arrangement.spacedBy(16.dp),
-            ) {
-                Heading(R.string.goal_heading, MaterialTheme.typography.titleMedium)
-                Text(goal.statement)
-                Heading(R.string.completion_criteria, MaterialTheme.typography.titleMedium)
-                Text(goal.completionCriteria ?: stringResource(R.string.completion_criteria_missing))
-                // 재개는 현재 행동이나 보류 중 화면에서만 한다(iOS `canResumeFromGoal`).
-                if (goal.deferredActions.isNotEmpty() && (screen is ProgressScreen.CurrentAction || screen is ProgressScreen.OnHold)) {
-                    Heading(R.string.deferred_actions, MaterialTheme.typography.titleMedium)
-                    if (screen is ProgressScreen.CurrentAction) {
-                        Text(
-                            stringResource(R.string.resume_moves_current),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+        GoalViewSheet(
+            goal,
+            screen,
+            storageFailed,
+            flow,
+            goalCommand,
+            run,
+            // 재개는 현재 행동이나 보류 중 화면에서만 한다(iOS `canResumeFromGoal`).
+            resume = { actionId -> showingGoal = false; resume(actionId) },
+            onClose = { showingGoal = false },
+        )
+    }
+}
+
+/** '목표 목록' 시트다. 저장한 모든 목표(중단한 목표 포함)에서 하나를 고르거나 새 목표를 시작한다. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GoalListSheet(
+    state: ProgressState,
+    storageFailed: Boolean,
+    onDismiss: () -> Unit,
+    select: (Long) -> Unit,
+    startNew: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            Arrangement.spacedBy(16.dp),
+        ) {
+            Heading(R.string.goal_list, MaterialTheme.typography.titleLarge)
+            CommandButton(R.string.new_goal, onClick = startNew)
+            if (state.goals.isEmpty()) Text(stringResource(R.string.no_saved_goals), style = MaterialTheme.typography.bodyLarge)
+            for (goal in state.goals) GoalRow(goal, selected = goal.id == state.goal?.id) { select(goal.id) }
+            if (storageFailed) StorageFailure()
+            CommandButton(R.string.close, prominent = false, onClick = onDismiss)
+        }
+    }
+}
+
+/** 목표 하나다. 문구·진행 중이거나 중단한 상태·완료한 행동 수·선택 표시가 한 번에 읽힌다. */
+@Composable
+private fun GoalRow(goal: GoalSummary, selected: Boolean, onClick: () -> Unit) {
+    Card(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected, onClick = onClick, role = Role.Button)) {
+        Column(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) {
+            Text(goal.statement, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+            Text(
+                stringResource(if (goal.isStopped) R.string.goal_stopped else R.string.goal_in_progress),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                stringResource(R.string.completed_actions, goal.completedActionCount),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (selected) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // 표시만 하는 그림 글자다. 읽히지 않게 하고 '선택한 목표'와 선택 상태로 읽는다.
+                    Text("✓", Modifier.clearAndSetSemantics {}, color = MaterialTheme.colorScheme.primary)
+                    Text(stringResource(R.string.selected_goal), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * '목표 보기' 시트다. 선택한 목표의 문구 수정, 중단, 삭제와 보류한 행동의 재개를 한다.
+ * 삭제는 확인 대화상자를 거친다. 시스템 뒤로 가기는 대화상자를 먼저, 그다음 시트를 닫고 진행 상태를 바꾸지 않는다.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GoalViewSheet(
+    goal: GoalDetails,
+    screen: ProgressScreen,
+    storageFailed: Boolean,
+    flow: ProgressFlow,
+    goalCommand: (suspend () -> Unit) -> Unit,
+    run: (suspend () -> Unit) -> Unit,
+    resume: (Long) -> Unit,
+    onClose: () -> Unit,
+) {
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var confirmingDeletion by rememberSaveable { mutableStateOf(false) }
+    ModalBottomSheet(onDismissRequest = onClose) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            Arrangement.spacedBy(16.dp),
+        ) {
+            Heading(R.string.goal_view, MaterialTheme.typography.titleLarge)
+            Heading(R.string.goal_heading, MaterialTheme.typography.titleMedium)
+            if (editing) {
+                val statement = rememberTextFieldState(goal.statement)
+                LabeledField(stringResource(R.string.goal_statement_label), statement)
+                Text(stringResource(R.string.goal_statement_edit_guide), style = MaterialTheme.typography.bodyMedium)
+                CommandButton(R.string.save_statement, enabled = statement.text.isNotBlank(), prominent = false) {
+                    val text = statement.text.toString()
+                    run {
+                        flow.editGoalStatement(text)
+                        editing = false
                     }
-                    for (action in goal.deferredActions) {
-                        DeferredAction(action) {
-                            showingGoal = false
-                            resume(action.id)
-                        }
+                }
+            } else {
+                Text(goal.statement)
+                TextButton({ editing = true }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.edit_statement)) }
+            }
+            Heading(R.string.completion_criteria, MaterialTheme.typography.titleMedium)
+            Text(goal.completionCriteria ?: stringResource(R.string.completion_criteria_missing))
+            if (goal.deferredActions.isNotEmpty() && (screen is ProgressScreen.CurrentAction || screen is ProgressScreen.OnHold)) {
+                Heading(R.string.deferred_actions, MaterialTheme.typography.titleMedium)
+                if (screen is ProgressScreen.CurrentAction) {
+                    Text(
+                        stringResource(R.string.resume_moves_current),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                for (action in goal.deferredActions) DeferredAction(action) { resume(action.id) }
+            }
+            if (screen !is ProgressScreen.StoppedGoal) {
+                CommandButton(R.string.goal_stopped, prominent = false) {
+                    goalCommand {
+                        flow.stopGoal()
+                        onClose()
                     }
                 }
             }
+            OutlinedButton(
+                { confirmingDeletion = true },
+                Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(stringResource(R.string.delete_goal)) }
+            if (storageFailed) StorageFailure()
+        }
+        if (confirmingDeletion) {
+            AlertDialog(
+                onDismissRequest = { confirmingDeletion = false },
+                title = { Text(stringResource(R.string.delete_goal_title)) },
+                // 큰 글꼴이나 긴 문구에서 메시지가 잘리지 않게 스크롤한다.
+                text = { Column(Modifier.verticalScroll(rememberScrollState())) { Text(stringResource(R.string.delete_goal_message, goal.statement)) } },
+                confirmButton = {
+                    TextButton(
+                        {
+                            confirmingDeletion = false
+                            run {
+                                flow.deleteGoal(goal.id, confirmed = true)
+                                onClose()
+                            }
+                        },
+                        Modifier.heightIn(min = 48.dp),
+                    ) { Text(stringResource(R.string.delete)) }
+                },
+                dismissButton = { TextButton({ confirmingDeletion = false }, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.cancel)) } },
+            )
         }
     }
 }
@@ -525,24 +671,28 @@ private val ProgressScreen.key: String
         is ProgressScreen.CurrentAction -> "currentAction-${card.id}"
         is ProgressScreen.AwaitingNextAction -> "awaitingNextAction-$problem"
         is ProgressScreen.OnHold -> "onHold-$status"
+        is ProgressScreen.StoppedGoal -> "stoppedGoal"
     }
 
 /** 큰 글꼴에서는 머리 영역을 세로로 쌓는다. */
 @Composable
-private fun Header(largeText: Boolean, hasGoal: Boolean, onShowGoal: () -> Unit) {
+private fun Header(largeText: Boolean, hasGoal: Boolean, onShowGoals: () -> Unit, onShowGoal: () -> Unit) {
     val title = @Composable { Heading(R.string.app_name, MaterialTheme.typography.titleMedium) }
+    val goalsButton = @Composable { TextButton(onShowGoals, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.goal_list)) } }
     val goalButton = @Composable {
         if (hasGoal) TextButton(onShowGoal, Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.goal_view)) }
     }
     if (largeText) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             title()
+            goalsButton()
             goalButton()
         }
     } else {
         Row(verticalAlignment = Alignment.CenterVertically) {
             title()
             Spacer(Modifier.weight(1f))
+            goalsButton()
             goalButton()
         }
     }
@@ -898,6 +1048,24 @@ private fun CommandButton(@StringRes title: Int, enabled: Boolean = true, promin
     }
 }
 
+/** 중단한 목표다. 마지막 행동과 남긴 결과·입력 초안을 보여주기만 한다. 더 진행하는 버튼은 없다. */
+@Composable
+private fun StoppedGoalContent(card: ActionCard?) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Heading(R.string.goal_stopped, MaterialTheme.typography.titleLarge)
+        Text(stringResource(R.string.goal_stopped_notice), style = MaterialTheme.typography.bodyLarge)
+        if (card != null) {
+            Text(stringResource(R.string.last_action), style = MaterialTheme.typography.titleMedium)
+            Text(card.task, style = MaterialTheme.typography.bodyLarge)
+            ResultSection(R.string.action_results, card.results)
+            if (card.draft.isNotEmpty()) {
+                Text(stringResource(R.string.input_draft), style = MaterialTheme.typography.titleMedium)
+                Text(card.draft, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
 /** 대체 행동을 기다리거나 받지 못한 상태와 보류한 행동 목록이다. 다른 목표로 자동 이동하지 않는다. */
 @Composable
 private fun OnHoldContent(screen: ProgressScreen.OnHold, flow: ProgressFlow, run: (suspend () -> Unit) -> Unit, resume: (Long) -> Unit) {
@@ -1003,6 +1171,8 @@ internal fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred:
                     new.problem?.reason ?: if (new.completionCriteria == null) R.string.preparing_goal else R.string.check_completion_criteria,
                 ),
             )
+            // iOS와 같이 중단한 목표가 보이는 화면으로 바뀔 때마다 안내한다.
+            is ProgressScreen.StoppedGoal -> add(resources.getString(R.string.announce_goal_stopped))
             ProgressScreen.GoalInput -> Unit
         }
     }
