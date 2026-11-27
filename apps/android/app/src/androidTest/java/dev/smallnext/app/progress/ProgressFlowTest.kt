@@ -208,7 +208,7 @@ class ProgressFlowTest {
         assertNull(again.state.value.goal?.completionCriteria)
     }
 
-    // iOS testSuggestionInputDraftsSurviveGoalSwitchAndReopenAndRejectStaleInput 중 목표 전환을 뺀 부분이다(목표 전환은 #357).
+    // iOS testSuggestionInputDraftsSurviveGoalSwitchAndReopenAndRejectStaleInput 중 목표 전환을 뺀 부분이다(목표 전환은 아래 `...GoalSwitchAndReopen...` 테스트가 한다).
     @Test
     fun testSuggestionInputDraftsSurviveReopenAndRejectStaleInput() = runBlocking {
         val flow = makeFlow(ScriptedProvider(Question("어떤 자료인가요?"), GoalSummary("자료를 정리했다")), preparing = false)
@@ -284,7 +284,7 @@ class ProgressFlowTest {
         assertEquals("자료 정리", flow.state.value.goal?.statement)
     }
 
-    // iOS는 행동 메모 초안과 '나중에'로 확인한다. 둘은 #351·#355에서 생겨 여기서는 목표 입력 초안으로 같은 계약을 확인한다.
+    // iOS는 행동 메모 초안과 '나중에'로 확인한다. 여기서는 목표 입력 초안으로 같은 계약을 확인한다.
     @Test
     fun testRunDoesNotRunCommandWhenDraftSaveFails() = runBlocking {
         val flow = makeFlow(UnavailableSuggestionProvider, preparing = false)
@@ -1717,5 +1717,30 @@ class ProgressFlowTest {
         assertEquals(before, flow.state.value)
         assertEquals(1L, count("SELECT COUNT(*) FROM goal"))
         assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE goal_id = $goalId"))
+    }
+
+    // 화면이 보여 준 목표가 이미 다른 목표로 바뀌었으면 문구 수정·중단은 아무것도 쓰지 않는다(목표를 옮기는 중에 시트가 남은 경우).
+    @Test
+    fun testEditingOrStoppingWithStaleGoalIdChangesNothing() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        startGoal(flow, "학습 자료 정리")
+        flow.awaitSuggestion()
+        val firstGoal = flow.goalId()
+        startAnotherGoal(flow, "화분 옮기기")
+        flow.awaitSuggestion()
+        val secondGoal = flow.goalId()
+        val before = flow.state.value
+        val edit = failure { flow.editGoalStatement("다른 목표에 들어가면 안 되는 문구", expectedGoalId = firstGoal) }
+        assertEquals(ProgressFlowException.Reason.GOAL_NOT_FOUND, (edit as ProgressFlowException).reason)
+        val stop = failure { flow.stopGoal(expectedGoalId = firstGoal) }
+        assertEquals(ProgressFlowException.Reason.GOAL_NOT_FOUND, (stop as ProgressFlowException).reason)
+        assertEquals(before, flow.state.value)
+        assertEquals(0L, count("SELECT COUNT(*) FROM goal WHERE status = 'stopped'"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE id = $secondGoal AND statement = '화분 옮기기'"))
+        // 선택한 목표의 ID이면 고치고 중단한다.
+        flow.editGoalStatement("화분 가져오기", expectedGoalId = secondGoal)
+        assertEquals("화분 가져오기", flow.state.value.goal?.statement)
+        flow.stopGoal(expectedGoalId = secondGoal)
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE id = $secondGoal AND status = 'stopped'"))
     }
 }

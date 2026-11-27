@@ -211,12 +211,14 @@ class ProgressFlow private constructor(
 
     /**
      * 선택한 목표의 문구만 고친다. 완료 조건과 행동·입력·완료 기록은 유지한다.
+     * [expectedGoalId]를 주면 화면이 보여 준 목표가 아직 선택한 목표일 때만 고친다. 다르면 아무것도 쓰지 않고 GOAL_NOT_FOUND를 던진다.
      * 문구가 바뀌었으므로 대기 요청과 답하지 않은 질문은 이전 문구에 대한 것이라 중단한다. 늦은 응답은 적용하지 않는다.
      */
-    suspend fun editGoalStatement(text: String) = serially {
+    suspend fun editGoalStatement(text: String, expectedGoalId: Long? = null) = serially {
         val statement = nonempty(text) ?: fail(ProgressFlowException.Reason.EMPTY_GOAL)
         perform { db ->
-            val goalId = selectedGoalId(db) ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            val goalId = selectedGoalId(db)?.takeIf { expectedGoalId == null || it == expectedGoalId }
+                ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
             db.update("UPDATE goal SET statement = ?, updated_at = ? WHERE id = ?", statement, System.currentTimeMillis(), goalId)
             endPendingRequests(db, goalId, "interrupted")
             // 확인 중인 목표도 다시 열었을 때 고친 문구로 복구한다.
@@ -233,10 +235,14 @@ class ProgressFlow private constructor(
         suggestionJob?.cancel()
     }
 
-    /** 선택한 목표의 수행을 중단한다. 행동·입력·결과·완료 기록은 보관한다. 대기 요청은 중단하고 늦은 응답은 적용하지 않는다. */
-    suspend fun stopGoal() = serially {
+    /**
+     * 선택한 목표의 수행을 중단한다. 행동·입력·결과·완료 기록은 보관한다. 대기 요청은 중단하고 늦은 응답은 적용하지 않는다.
+     * [expectedGoalId]는 [editGoalStatement]와 같다. 화면이 보여 준 목표가 아니면 아무것도 쓰지 않는다.
+     */
+    suspend fun stopGoal(expectedGoalId: Long? = null) = serially {
         perform { db ->
-            val goalId = selectedGoalId(db) ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
+            val goalId = selectedGoalId(db)?.takeIf { expectedGoalId == null || it == expectedGoalId }
+                ?: fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
             db.update("UPDATE goal SET status = 'stopped', updated_at = ? WHERE id = ?", System.currentTimeMillis(), goalId)
             endPendingRequests(db, goalId, "interrupted")
             null

@@ -188,6 +188,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     var showingGoals by rememberSaveable { mutableStateOf(false) }
     var announcement by remember { mutableStateOf("") }
     var shown by remember { mutableStateOf(state.screen) }
+    var shownGoalId by remember { mutableStateOf(state.goal?.id) }
     var shownDeferred by remember { mutableStateOf(state.goal?.deferredActions.orEmpty()) }
     val screen = state.screen
     var splitGhost by remember { mutableStateOf<SplitGhost?>(null) }
@@ -197,7 +198,15 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val announce = { message: String -> announcement = if (announcement == message) "$message\u200B" else message }
     LaunchedEffect(screen) {
         if (shown != screen) {
-            announcement(shown, screen, shownDeferred, state.goal?.deferredActions.orEmpty(), resources)?.let(announce)
+            // 목표가 바뀌면 이전 목표의 화면은 비교하지 않는다. 다른 목표의 행동을 완료·보류했다고 읽지 않도록 새 화면만 알린다.
+            val sameGoal = shownGoalId == state.goal?.id
+            announcement(
+                if (sameGoal) shown else ProgressScreen.GoalInput,
+                screen,
+                if (sameGoal) shownDeferred else emptyList(),
+                state.goal?.deferredActions.orEmpty(),
+                resources,
+            )?.let(announce)
             val old = (shown as? ProgressScreen.CurrentAction)?.card
             val new = (screen as? ProgressScreen.CurrentAction)?.card
             if (old != null && new != null && old.id != new.id) {
@@ -207,6 +216,7 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
             if (new?.id != undoneActionId) undoneActionId = null
         }
         shown = screen
+        shownGoalId = state.goal?.id
         shownDeferred = state.goal?.deferredActions.orEmpty()
     }
     val focusManager = LocalFocusManager.current
@@ -475,8 +485,9 @@ private fun GoalViewSheet(
     resume: (Long) -> Unit,
     onClose: () -> Unit,
 ) {
-    var editing by rememberSaveable { mutableStateOf(false) }
-    var confirmingDeletion by rememberSaveable { mutableStateOf(false) }
+    // 보여 주는 목표가 바뀌면 문구 수정·삭제 확인 상태는 처음으로 돌아간다. 이전 목표의 확인이 다른 목표에 남지 않는다.
+    var editing by rememberSaveable(goal.id) { mutableStateOf(false) }
+    var confirmingDeletion by rememberSaveable(goal.id) { mutableStateOf(false) }
     ModalBottomSheet(onDismissRequest = onClose) {
         Column(
             Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
@@ -491,7 +502,7 @@ private fun GoalViewSheet(
                 CommandButton(R.string.save_statement, enabled = statement.text.isNotBlank(), prominent = false) {
                     val text = statement.text.toString()
                     run {
-                        flow.editGoalStatement(text)
+                        flow.editGoalStatement(text, goal.id)
                         editing = false
                     }
                 }
@@ -515,7 +526,7 @@ private fun GoalViewSheet(
             if (screen !is ProgressScreen.StoppedGoal) {
                 CommandButton(R.string.goal_stopped, prominent = false) {
                     goalCommand {
-                        flow.stopGoal()
+                        flow.stopGoal(goal.id)
                         onClose()
                     }
                 }
