@@ -511,7 +511,9 @@ private fun QuestionAnswer(
             LabeledField(stringResource(R.string.smaller_question_prompt), answer)
             CommandButton(R.string.answer, enabled = answer.text.isNotBlank()) {
                 val text = answer.text.toString()
-                run { flow.run(Drafts(answer = text)) { flow.answerQuestion(text) } }
+                // 누른 순간 보던 질문의 요청 ID를 넘긴다. 그사이 다음 질문이 적용됐으면 이 답은 저장하지 않는다(#424).
+                val requestId = input?.requestId
+                run { flow.run(Drafts(answer = text, requestId = requestId)) { flow.answerQuestion(text, requestId) } }
             }
         }
     }
