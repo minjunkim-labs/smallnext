@@ -857,9 +857,9 @@ class ProgressFlowTest {
         assertEquals(0L, count("SELECT COUNT(*) FROM goal WHERE blocker IS NOT NULL"))
         assertEquals(3, provider.requests.size)
 
-        // 지금 질문의 요청 ID로는 저장한다.
+        // 지금 질문의 요청 ID로는 저장한다. `Waiting` 전이는 ungated 공급자 결과와 경쟁하므로 여기서 보지 않는다
+        // (testQuestionAnswerIsSavedAsBlockerAndSentWithNextRequest가 확인한다). 결과 적용을 기다린 뒤 최종 상태를 본다.
         flow.run(Drafts(answer = "자료 위치를 모름", requestId = latest)) { flow.answerQuestion("자료 위치를 모름", latest) }
-        assertEquals(SmallerStatus.Waiting, flow.smaller())
         flow.awaitSuggestion()
         assertEquals(smaller.task, flow.card().task)
         assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE blocker = '자료 위치를 모름'"))
