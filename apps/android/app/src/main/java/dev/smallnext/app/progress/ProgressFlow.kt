@@ -102,8 +102,7 @@ sealed interface HoldStatus {
 }
 
 /**
- * iOS `ProgressScreen` 중 이 단계에서 닿는 상태다. 대기 화면의 `problem`이 null이면 제안을 기다리는 중이다.
- * 정보 부족 안내·행동 질문은 해당 티켓(#356)에서 더한다.
+ * iOS `ProgressScreen`과 같은 화면 상태다. 대기 화면의 `problem`이 null이면 제안을 기다리는 중이다.
  */
 sealed interface ProgressScreen {
     data object GoalInput : ProgressScreen
@@ -111,6 +110,15 @@ sealed interface ProgressScreen {
     /** 첫 행동을 받기 전이다. 입력한 목표를 유지한다. */
     data class AwaitingFirstAction(val goal: String, override val problem: SuggestionProblem?) : ProgressScreen
     data class CurrentAction(val card: ActionCard, val smaller: SmallerStatus? = null) : ProgressScreen
+
+    /**
+     * 공급자가 근거가 부족하다고 알렸다. 실패나 목표 중단이 아니라 정상으로 끝난 요청이다(`applied`).
+     * 안내를 받은 뒤 목표 입력이 바뀌었으면 [isPrevious]가 true다.
+     */
+    data class InsufficientInfo(val notice: InformationNotice, val isPrevious: Boolean) : ProgressScreen
+
+    /** 확정한 목표의 행동 요청이 돌려준 미답 질문이다. 더 작게의 질문은 [SmallerStatus.Question]으로 현재 행동에 표시한다. */
+    data class ActionQuestion(val question: String) : ProgressScreen
     /** 완료 후 다음 행동을 받기 전이다. 완료 기록을 유지한다. */
     data class AwaitingNextAction(override val problem: SuggestionProblem?) : ProgressScreen
     /** 현재 행동이 없고 보류한 행동이 있다. 보류한 행동을 생성 순서대로 담아 재개할 수 있게 한다. */
@@ -135,7 +143,7 @@ val ProgressScreen.isWaitingForSuggestion: Boolean
         is ProgressScreen.AwaitingFirstAction, is ProgressScreen.AwaitingNextAction -> problem == null
         is ProgressScreen.CurrentAction -> smaller == SmallerStatus.Waiting
         is ProgressScreen.OnHold -> status == HoldStatus.Waiting
-        ProgressScreen.GoalInput, is ProgressScreen.StoppedGoal -> false
+        ProgressScreen.GoalInput, is ProgressScreen.StoppedGoal, is ProgressScreen.InsufficientInfo, is ProgressScreen.ActionQuestion -> false
     }
 
 data class ProgressState(
@@ -171,6 +179,8 @@ class ProgressFlow private constructor(
     @Volatile private var suggestionJob: Job? = null
     /** 결과 저장 실패로 DB에 pending이 남은 요청이다. 다음 성공한 명령에서 실패 상태도 저장한다. */
     private var unsavedSuggestionId: Long? = null
+    /** 이번 실행에서 닫은 정보 부족 안내의 요청 ID다. 안내는 저장해 두므로 다시 열면 복구된다. 목표를 옮기면 지운다. */
+    private var dismissedNoticeId: Long? = null
 
     /**
      * 사용자 명령 하나를 실행한다. 입력 초안을 먼저 저장한다(iOS `run(saving:)`).
@@ -202,6 +212,8 @@ class ProgressFlow private constructor(
             if (db.long("SELECT EXISTS (SELECT 1 FROM goal WHERE id = ?)", goalId) != 1L) fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
             selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
             db.setMetadata(SELECTED_GOAL_ID, goalId.toString())
+            // 상태를 다시 읽기 전에 지워야 옮겨 온 목표의 보존한 안내가 바로 복구된다.
+            dismissedNoticeId = null
             null
         }
         suggestionJob?.cancel()
@@ -212,6 +224,7 @@ class ProgressFlow private constructor(
         perform { db ->
             selectedGoalId(db)?.let { endPendingRequests(db, it, "interrupted") }
             db.update("DELETE FROM app_metadata WHERE `key` = ?", SELECTED_GOAL_ID)
+            dismissedNoticeId = null
             null
         }
         suggestionJob?.cancel()
@@ -259,7 +272,7 @@ class ProgressFlow private constructor(
     }
 
     /**
-     * 확인한 목표 하나만 삭제한다. 소속 행동·입력·완료·제안 요청은 외래 키로 함께 지운다.
+     * 확인한 목표 하나만 삭제한다. 소속 행동·입력·완료·제안 요청은 외래 키로, 입력 초안·정보 부족 안내 메타데이터는 같은 트랜잭션에서 함께 지운다.
      * 다른 목표와 작성 중인 새 목표 입력은 남는다. 선택한 목표를 지우면 새 목표 입력으로 이동한다.
      * [confirmed]가 아니거나 없는 목표이면 [ProgressFlowException]을 던지고 아무것도 지우지 않는다.
      */
@@ -268,7 +281,10 @@ class ProgressFlow private constructor(
         val deletingSelected = state.value.goal?.id == goalId
         perform { db ->
             if (db.update("DELETE FROM goal WHERE id = ?", goalId) != 1) fail(ProgressFlowException.Reason.GOAL_NOT_FOUND)
-            db.update("DELETE FROM app_metadata WHERE `key` IN (?, ?)", "$GOAL_INPUT:$goalId", "$SUGGESTION_INPUT:$goalId")
+            db.update(
+                "DELETE FROM app_metadata WHERE `key` IN (?, ?, ?)",
+                "$GOAL_INPUT:$goalId", "$SUGGESTION_INPUT:$goalId", "$SUPPLEMENTAL_CONTEXT:$goalId",
+            )
             if (selectedGoalId(db) == goalId) db.update("DELETE FROM app_metadata WHERE `key` = ?", SELECTED_GOAL_ID)
             null
         }
@@ -443,7 +459,8 @@ class ProgressFlow private constructor(
      * 그사이 다음 질문이 먼저 적용됐으면 앞 질문의 답은 저장하지 않고 새 질문과 막힘 원인도 바꾸지 않는다(#424).
      */
     suspend fun answerQuestion(text: String, requestId: Long? = null) = serially {
-        if ((state.value.screen as? ProgressScreen.CurrentAction)?.smaller !is SmallerStatus.Question) return@serially
+        val screen = state.value.screen
+        if (screen !is ProgressScreen.ActionQuestion && (screen as? ProgressScreen.CurrentAction)?.smaller !is SmallerStatus.Question) return@serially
         if (requestId != null && requestId != state.value.suggestionInput?.requestId) return@serially
         val answer = nonempty(text) ?: fail(ProgressFlowException.Reason.EMPTY_ANSWER)
         val input = state.value.suggestionInput ?: fail(ProgressFlowException.Reason.GOAL_NOT_READY)
@@ -569,6 +586,19 @@ class ProgressFlow private constructor(
         suggestionJob?.cancel()
     }
 
+    /**
+     * 더 작게 요청의 정보 부족 안내를 닫고 현재 미완료 행동으로 돌아간다. 안내는 보존하므로 다시 열면 복구된다.
+     * 다른 종류의 안내는 닫지 않는다. 화면은 목표 목록을 연다.
+     */
+    suspend fun dismissInformationNotice() = serially {
+        val notice = (state.value.screen as? ProgressScreen.InsufficientInfo)?.notice?.takeIf { it.requestKind == SuggestionKind.SMALLER }
+            ?: return@serially
+        val restored = database.write { db -> loadState(db, hidingNotice = notice.requestId) }
+        if (restored.screen !is ProgressScreen.CurrentAction) return@serially
+        dismissedNoticeId = notice.requestId
+        _state.value = restored
+    }
+
     /** 진행 중인 제안 요청이 끝날 때까지 기다린다. 테스트에서 쓴다. */
     internal suspend fun awaitSuggestion() {
         suggestionJob?.join()
@@ -589,7 +619,7 @@ class ProgressFlow private constructor(
                     SuggestionFailure.FAILED.raw, it,
                 )
             }
-            command(db) to loadState(db)
+            command(db) to loadState(db, dismissedNoticeId)
         }
         unsavedSuggestionId = null
         _state.value = state
@@ -618,7 +648,7 @@ class ProgressFlow private constructor(
         try {
             _state.value = database.write { db ->
                 apply(db, pending, outcome)
-                loadState(db)
+                loadState(db, dismissedNoticeId)
             }
         } catch (error: Exception) {
             // 예외 메시지에는 원문이 담길 수 있어 클래스 이름만 남긴다.
@@ -646,6 +676,7 @@ class ProgressFlow private constructor(
         private const val GOAL_INPUT = "goal_input"
         private const val SUGGESTION_INPUT = "suggestion_input"
         private const val SELECTED_GOAL_ID = "selected_goal_id"
+        private const val SUPPLEMENTAL_CONTEXT = "supplemental_context"
         private const val UNSUITABLE = "unsuitable"
         private val gson = Gson()
         private val stringList = object : TypeToken<List<String>>() {}.type
@@ -667,7 +698,7 @@ class ProgressFlow private constructor(
 
         /**
          * 요청이 아직 `pending`이고 목표 리비전이 같을 때만 결과를 적용한다. 리비전이 바뀐 요청은 `interrupted`로 끝낸다.
-         * 아직 화면이 없는 후보(더 작게가 아닌 행동 요청의 질문, 정보 부족)는 부적합으로 끝낸다(#356).
+         * 정보 부족 안내는 같은 트랜잭션에서 목표별 메타데이터에 저장하고 요청을 `applied`로 끝낸다. 행동·완료·보류·중단을 만들지 않는다.
          */
         private fun apply(db: SupportSQLiteDatabase, pending: PendingSuggestion, outcome: Result<SuggestionCandidate>) {
             val (status, revision) = db.query(
@@ -695,9 +726,7 @@ class ProgressFlow private constructor(
                         "SELECT EXISTS (SELECT 1 FROM suggestion_request WHERE goal_id = ? AND question = ? AND answer IS NOT NULL)",
                         pending.goalId, candidate.question,
                     ) == 1L
-                    if ((pending.request.kind != SuggestionKind.GOAL_PREPARATION && !isSmaller) || answered) {
-                        return finishRequest(db, pending.id, "failed", UNSUITABLE)
-                    }
+                    if (answered) return finishRequest(db, pending.id, "failed", UNSUITABLE)
                     db.update("UPDATE suggestion_request SET status = 'applied', question = ? WHERE id = ?", candidate.question, pending.id)
                     return
                 }
@@ -705,8 +734,20 @@ class ProgressFlow private constructor(
                 is SuggestionCandidate.MinimalAction -> candidate.action
                 // 보류 중 화면을 보여준다. 정책은 대체 요청의 후보 없음만 받는다.
                 SuggestionCandidate.NoAction -> return finishRequest(db, pending.id, "applied", null)
-                is SuggestionCandidate.InsufficientInfo, null ->
-                    return finishRequest(db, pending.id, "failed", UNSUITABLE)
+                is SuggestionCandidate.InsufficientInfo -> {
+                    val notice = StoredNotice(
+                        requestId = pending.id,
+                        requestKind = pending.request.kind.raw,
+                        goalRevision = pending.revision,
+                        inputFingerprint = ServerSuggestionProvider.inputFingerprint(pending.request),
+                        reason = candidate.reason,
+                        receivedAt = System.currentTimeMillis(),
+                        currentActionId = db.long("SELECT id FROM action WHERE goal_id = ? AND status = 'current'", pending.goalId),
+                    )
+                    saveSupplementalContext(db, pending.goalId, (loadSupplementalContext(db, pending.goalId) ?: StoredSupplementalContext()).copy(lastNotice = notice))
+                    return finishRequest(db, pending.id, "applied", null)
+                }
+                null -> return finishRequest(db, pending.id, "failed", UNSUITABLE)
             }
             // 분할 원본은 내용을 바꾸지 않고 `split`으로 남긴다. 남은 범위와 목표의 완료 조건을 유지한다.
             var sourceId: Long? = null
@@ -825,9 +866,10 @@ class ProgressFlow private constructor(
 
         // 화면 상태
 
-        private fun loadState(db: SupportSQLiteDatabase): ProgressState {
+        /** [hidingNotice]는 이번 실행에서 닫은 안내의 요청 ID다. 그 안내는 화면 상태로 바꾸지 않는다. */
+        private fun loadState(db: SupportSQLiteDatabase, hidingNotice: Long? = null): ProgressState {
             val goalId = selectedGoalId(db)
-            val screen = loadScreen(db, goalId)
+            val screen = loadScreen(db, goalId, hidingNotice)
             return ProgressState(
                 screen, loadGoalInput(db, goalId), goalId?.let { loadGoalDetails(db, it) }, goalId?.let { loadSuggestionInput(db, it, screen) },
                 loadGoals(db),
@@ -839,11 +881,12 @@ class ProgressFlow private constructor(
                 "(SELECT COUNT(*) FROM completion c JOIN action a ON a.id = c.action_id WHERE a.goal_id = g.id) FROM goal g ORDER BY g.id",
         ) { GoalSummary(it.getLong(0), it.getString(1), it.getString(2) == "stopped", it.getInt(3)) }
 
-        /** 확인 질문이나 확인할 완료 조건이 보이는 동안만 초안을 받는다. 행동 질문은 #356에서 더한다. */
+        /** 확인 질문(목표·행동)이나 확인할 완료 조건이 보이는 동안만 초안을 받는다. */
         private fun loadSuggestionInput(db: SupportSQLiteDatabase, goalId: Long, screen: ProgressScreen): SuggestionInput? {
             val asking = when (screen) {
                 is ProgressScreen.PreparingGoal -> screen.problem == null && (screen.question != null || screen.completionCriteria != null)
                 is ProgressScreen.CurrentAction -> screen.smaller is SmallerStatus.Question
+                is ProgressScreen.ActionQuestion -> true
                 else -> false
             }
             if (!asking) return null
@@ -888,20 +931,32 @@ class ProgressFlow private constructor(
         private fun hasCompletion(db: SupportSQLiteDatabase, goalId: Long) =
             db.long("SELECT EXISTS (SELECT 1 FROM action WHERE goal_id = ? AND status = 'done')", goalId) == 1L
 
-        private fun loadScreen(db: SupportSQLiteDatabase, goalId: Long?): ProgressScreen {
+        private fun loadScreen(db: SupportSQLiteDatabase, goalId: Long?, hidingNotice: Long? = null): ProgressScreen {
             goalId ?: return ProgressScreen.GoalInput
-            val (statement, confirmed, proposed, stopped) = db.query(
-                "SELECT statement, is_confirmed, proposed_completion_criteria, status = 'stopped' FROM goal WHERE id = ?", goalId,
-            ) { GoalRow(it.getString(0), it.getInt(1) == 1, it.optString(2), it.getInt(3) == 1) }.firstOrNull() ?: return ProgressScreen.GoalInput
+            val (statement, confirmed, proposed, stopped, revision) = db.query(
+                "SELECT statement, is_confirmed, proposed_completion_criteria, status = 'stopped', revision FROM goal WHERE id = ?", goalId,
+            ) { GoalRow(it.getString(0), it.getInt(1) == 1, it.optString(2), it.getInt(3) == 1, it.getInt(4)) }.firstOrNull()
+                ?: return ProgressScreen.GoalInput
             val latest = db.query(
-                "SELECT r.status, r.failure_reason, r.question, r.kind, r.goal_revision = g.revision " +
+                "SELECT r.id, r.status, r.failure_reason, r.question, r.kind, r.goal_revision = g.revision, r.answer IS NOT NULL " +
                     "FROM suggestion_request r JOIN goal g ON g.id = r.goal_id WHERE r.goal_id = ? ORDER BY r.id DESC LIMIT 1",
                 goalId,
-            ) { LatestRequest(it.getString(0), it.optString(1), it.optString(2), SuggestionKind.of(it.getString(3)), it.getInt(4) == 1) }
-                .firstOrNull()
+            ) {
+                LatestRequest(
+                    it.getLong(0), it.getString(1), it.optString(2), it.optString(3), SuggestionKind.of(it.getString(4)), it.getInt(5) == 1, it.getInt(6) == 1,
+                )
+            }.firstOrNull()
             // 요청이 없으면 이전 상태에 대한 요청처럼 다시 시도를 기다린다.
             val problem = if (latest == null) SuggestionProblem.Interrupted else requestProblem(latest.status, latest.failureReason)
             if (!confirmed) return if (stopped) ProgressScreen.StoppedGoal(null) else ProgressScreen.PreparingGoal(latest?.question, proposed, problem)
+            // 마지막 요청이 정상으로 끝난 정보 부족 안내이면 현재 행동보다 먼저 보여준다. 안내 뒤 입력이 바뀌었으면 이전 입력에 대한 안내다.
+            if (!stopped && latest != null && latest.status == "applied") {
+                loadSupplementalContext(db, goalId)?.lastNotice?.takeIf { it.requestId == latest.id && it.requestId != hidingNotice }
+                    ?.toNotice()?.let { notice ->
+                        val fingerprint = ServerSuggestionProvider.inputFingerprint(makeRequest(db, goalId, revision, notice.requestKind))
+                        return ProgressScreen.InsufficientInfo(notice, notice.goalRevision != revision || notice.inputFingerprint != fingerprint)
+                    }
+            }
             val card = loadCard(db, goalId)
             // 중단한 목표는 마지막 행동만 보여준다. 대기 요청이나 보류 목록을 화면 상태로 바꾸지 않는다.
             if (stopped) return ProgressScreen.StoppedGoal(card)
@@ -917,25 +972,40 @@ class ProgressFlow private constructor(
                 }
                 return ProgressScreen.CurrentAction(card, smaller)
             }
+            // 현재 행동이 없을 때 같은 리비전의 실제 미답 질문은 행동 질문 화면이다. 더 작게의 질문은 위에서 현재 행동에 표시했다.
+            if (latest != null && latest.status == "applied" && latest.question != null && !latest.answered && latest.currentRevision) {
+                return ProgressScreen.ActionQuestion(latest.question)
+            }
+            // 답하지 못한 채 목표가 바뀐 질문은 이전 상태에 대한 요청이다.
+            val waitingProblem = if (latest?.question != null && !latest.currentRevision) SuggestionProblem.Interrupted else problem
             // 보류한 행동이 있으면 어떤 요청을 기다리거나 실패해도 재개할 수 있게 보류 목록을 보여준다.
             val deferred = deferredCards(db, goalId)
             if (deferred.isNotEmpty()) {
                 val status = when {
-                    problem != null -> HoldStatus.Problem(problem)
+                    waitingProblem != null -> HoldStatus.Problem(waitingProblem)
                     latest?.status == "pending" -> HoldStatus.Waiting
                     else -> HoldStatus.NoAction
                 }
                 return ProgressScreen.OnHold(deferred, status)
             }
-            if (hasCompletion(db, goalId)) return ProgressScreen.AwaitingNextAction(problem)
-            return ProgressScreen.AwaitingFirstAction(statement, problem)
+            if (hasCompletion(db, goalId)) return ProgressScreen.AwaitingNextAction(waitingProblem)
+            return ProgressScreen.AwaitingFirstAction(statement, waitingProblem)
         }
 
-        private data class GoalRow(val statement: String, val confirmed: Boolean, val proposed: String?, val stopped: Boolean)
+        private data class GoalRow(val statement: String, val confirmed: Boolean, val proposed: String?, val stopped: Boolean, val revision: Int)
 
         private class LatestRequest(
-            val status: String, val failureReason: String?, val question: String?, val kind: SuggestionKind?, val currentRevision: Boolean,
+            val id: Long, val status: String, val failureReason: String?, val question: String?, val kind: SuggestionKind?,
+            val currentRevision: Boolean, val answered: Boolean,
         )
+
+        private fun saveSupplementalContext(db: SupportSQLiteDatabase, goalId: Long, context: StoredSupplementalContext) {
+            db.setMetadata("$SUPPLEMENTAL_CONTEXT:$goalId", gson.toJson(context))
+        }
+
+        private fun loadSupplementalContext(db: SupportSQLiteDatabase, goalId: Long): StoredSupplementalContext? =
+            db.string("SELECT value FROM app_metadata WHERE `key` = ?", "$SUPPLEMENTAL_CONTEXT:$goalId")
+                ?.let { gson.fromJson(it, StoredSupplementalContext::class.java) }
 
         private fun loadCard(db: SupportSQLiteDatabase, goalId: Long): ActionCard? {
             val card = db.query(

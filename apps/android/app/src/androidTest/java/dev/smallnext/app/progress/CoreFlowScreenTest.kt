@@ -47,6 +47,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.smallnext.app.data.AppDatabase
 import dev.smallnext.app.progress.SuggestionCandidate.Action
 import dev.smallnext.app.progress.SuggestionCandidate.GoalSummary
+import dev.smallnext.app.progress.SuggestionCandidate.InsufficientInfo
 import dev.smallnext.app.progress.SuggestionCandidate.NoAction
 import dev.smallnext.app.progress.SuggestionCandidate.Question
 import java.util.UUID
@@ -1198,5 +1199,125 @@ class CoreFlowScreenTest {
         compose.onNodeWithText(message).assertExists()
         assertFullyLaidOut(message, unmerged = true)
         compose.onNodeWithText("삭제").assertHeightIsAtLeast(48.dp)
+    }
+
+    // 정보 부족 안내와 행동 확인 질문(#356)
+
+    private val noticeTitle = "지금은 새 행동을 제안하기 어려워요"
+    private val goBack = "돌아가기"
+
+    /** 첫 행동 요청부터 [candidates]를 받는 흐름이다. 목표를 확인하고 결과가 적용될 때까지 기다린다. */
+    private fun flowWithFirstResult(vararg candidates: SuggestionCandidate): Pair<ProgressFlow, ScriptedProvider> {
+        val provider = ScriptedProvider(*candidates)
+        val flow = flow(goalPreparing(provider))
+        runBlocking {
+            flow.prepareGoal(GoalInput("분기 업무 보고서 초안 쓰기"))
+            flow.awaitSuggestion()
+            flow.confirmGoal("분기 업무 보고서 초안 쓰기")
+            flow.awaitSuggestion()
+        }
+        return flow to provider
+    }
+
+    /** 누르면 일어날 일을 읽는 클릭 레이블이 iOS 접근성 힌트와 같고, 버튼 자체의 클릭 동작도 남아 있다. */
+    private fun SemanticsNodeInteraction.assertClickLabel(label: String) = assert(
+        SemanticsMatcher("클릭 레이블 '$label'과 클릭 동작") {
+            val click = it.config.getOrNull(SemanticsActions.OnClick)
+            click?.label == label && click.action != null
+        },
+    )
+
+    // 안내 화면: 제목이 heading이고 초점을 받는다. 사유와 돌아가기 버튼은 48dp 이상이고, 돌아가기는 목표 목록을 열며 안내를 보존한다.
+    @Test
+    fun insufficientInfoNoticeTakesFocusAndGoesBackToGoalListKeepingTheNotice() {
+        val (flow, _) = flowWithFirstResult(InsufficientInfo(InsufficientInfoFixture.REASON))
+        show(flow)
+        waitForText(noticeTitle)
+        assertHeading(noticeTitle)
+        compose.onNodeWithText(noticeTitle).assertIsFocused()
+        compose.onNodeWithText(InsufficientInfoFixture.REASON).assertIsDisplayed()
+        // 지금 입력에 대한 안내이므로 이전 입력 안내문은 없다. 안내는 실패가 아니므로 다시 시도·취소 버튼도 없다.
+        compose.onAllNodes(hasText("이전 입력에 대한 안내예요.")).assertCountEquals(0)
+        compose.onAllNodes(hasText("다시 시도")).assertCountEquals(0)
+        compose.onNodeWithText(goBack).assertHeightIsAtLeast(48.dp)
+            .assertClickLabel("목표 목록으로 돌아갑니다. 저장한 목표와 안내를 유지합니다.")
+            .performScrollTo().performClick()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("새 목표")).fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(1L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` LIKE 'supplemental_context:%'"))
+        assertTrue(flow.state.value.screen is ProgressScreen.InsufficientInfo)
+    }
+
+    // 더 작게 요청의 안내는 돌아가기로 보존한 현재 행동으로 간다. 안내는 남아 있어 다시 열면 복구된다.
+    @Test
+    fun smallerNoticeGoBackReturnsToTheCurrentActionAndKeepsTheNotice() {
+        val (flow, provider) = gatedFlowWithCard(InsufficientInfo(InsufficientInfoFixture.REASON))
+        show(flow)
+        waitForText(first.task)
+        compose.onNodeWithText("더 작게").performClick()
+        provider.release()
+        waitForText(noticeTitle)
+        assertHeading(noticeTitle)
+        compose.onNodeWithText(noticeTitle).assertIsFocused()
+        compose.onNodeWithText(goBack).assertHeightIsAtLeast(48.dp)
+            .assertClickLabel("현재 행동으로 돌아갑니다. 저장한 행동과 안내를 유지합니다.")
+            .performScrollTo().performClick()
+        waitForText(first.task)
+        compose.onAllNodes(hasText(noticeTitle)).assertCountEquals(0)
+        assertTrue(flow.state.value.screen is ProgressScreen.CurrentAction)
+        assertEquals(1L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` LIKE 'supplemental_context:%'"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM action WHERE task = '${first.task}' AND status = 'current'"))
+    }
+
+    // 안내를 받은 뒤 목표 문구가 바뀌었으면 이전 입력에 대한 안내임을 함께 읽힌다.
+    @Test
+    fun previousInputNoticeIsLabeled() {
+        val (flow, _) = flowWithFirstResult(InsufficientInfo(InsufficientInfoFixture.REASON))
+        runBlocking { flow.editGoalStatement("달라진 목표 문구") }
+        show(flow)
+        waitForText(noticeTitle)
+        compose.onNodeWithText("이전 입력에 대한 안내예요.").assertIsDisplayed()
+        compose.onNodeWithText(InsufficientInfoFixture.REASON).assertIsDisplayed()
+    }
+
+    // 행동 확인 질문: 질문이 heading이고 초점을 받는다. 답은 초안으로 저장되고 원래 요청에 붙어 한 번 다시 간다. 돌아가기는 작성 중인 답을 보존한다.
+    @Test
+    fun actionQuestionTakesFocusSavesDraftAndSendsAnswerWithTheOriginalRequest() {
+        val (flow, provider) = flowWithFirstResult(Question(InsufficientInfoFixture.QUESTION), InsufficientInfo(InsufficientInfoFixture.REASON))
+        show(flow)
+        waitForText(InsufficientInfoFixture.QUESTION)
+        assertHeading(InsufficientInfoFixture.QUESTION)
+        compose.onNodeWithText(InsufficientInfoFixture.QUESTION).assertIsFocused()
+        compose.onNode(hasSetTextAction() and hasText("알고 있는 답")).performTextInput(InsufficientInfoFixture.ANSWER)
+        compose.waitUntil(5_000) { flow.state.value.suggestionInput?.text == InsufficientInfoFixture.ANSWER }
+        compose.onNodeWithText(goBack).performScrollTo().assertHeightIsAtLeast(48.dp)
+            .assertClickLabel("목표 목록으로 돌아갑니다. 작성 중인 답은 보존합니다.")
+        compose.onNodeWithText("답하기").assertHeightIsAtLeast(48.dp).performScrollTo().clickAfterTyping()
+        waitForText(noticeTitle)
+        assertHeading(noticeTitle)
+        assertEquals(listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.FIRST_ACTION), provider.requests.map { it.kind })
+        assertEquals(listOf(GoalAnswer(InsufficientInfoFixture.QUESTION, InsufficientInfoFixture.ANSWER)), provider.requests.last().actionAnswers)
+    }
+
+    // 최대 글꼴: 안내 제목·사유·질문이 본문에서 잘리지 않고, 돌아가기·답하기는 48dp 이상이다.
+    @Test
+    fun largestFontKeepsNoticeInBody() {
+        val (notice, _) = flowWithFirstResult(InsufficientInfo(InsufficientInfoFixture.REASON))
+        show(notice, fontScale = 2f)
+        waitForText(noticeTitle)
+        compose.onNodeWithText(noticeTitle).performScrollTo()
+        assertFullyLaidOut(noticeTitle)
+        compose.onNodeWithText(InsufficientInfoFixture.REASON).performScrollTo()
+        assertFullyLaidOut(InsufficientInfoFixture.REASON)
+        compose.onNodeWithText(goBack).performScrollTo().assertHeightIsAtLeast(48.dp)
+    }
+
+    @Test
+    fun largestFontKeepsActionQuestionInBody() {
+        val (flow, _) = flowWithFirstResult(Question(InsufficientInfoFixture.QUESTION))
+        show(flow, fontScale = 2f)
+        waitForText(InsufficientInfoFixture.QUESTION)
+        assertFullyLaidOut(InsufficientInfoFixture.QUESTION)
+        compose.onNodeWithText("답하기").performScrollTo().assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithText(goBack).performScrollTo().assertHeightIsAtLeast(48.dp)
     }
 }

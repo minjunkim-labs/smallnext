@@ -98,6 +98,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -383,6 +384,8 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
                         SuggestionStatus(R.string.preparing_next_action, target.problem, flow, run)
                     }
                     is ProgressScreen.OnHold -> OnHoldContent(target, flow, run, resume)
+                    is ProgressScreen.InsufficientInfo -> InsufficientInfoContent(target, flow, run) { showingGoals = true }
+                    is ProgressScreen.ActionQuestion -> ActionQuestionContent(target, state.suggestionInput, flow, run, save) { showingGoals = true }
                     is ProgressScreen.StoppedGoal -> StoppedGoalContent(target.card)
                 }
             }
@@ -635,10 +638,61 @@ private fun BoxScope.SplitGhostView(ghost: SplitGhost, onFinish: () -> Unit) {
     }
 }
 
-/** 더 작게의 확인 질문 하나다. 나타나면 초점을 질문으로 옮긴다. 답은 막힘 원인으로 저장된다. */
+/**
+ * 정보 부족 안내다. 실패나 목표 중단이 아니라 정상으로 끝난 요청의 결과다. 나타나면 초점이 제목으로 옮겨져 제목·이유·'돌아가기'가 차례로 읽힌다.
+ * '돌아가기'는 더 작게 요청이면 현재 행동으로, 그 밖에는 목표 목록으로 간다. 안내는 보존한다.
+ */
+@Composable
+private fun InsufficientInfoContent(
+    screen: ProgressScreen.InsufficientInfo,
+    flow: ProgressFlow,
+    run: (suspend () -> Unit) -> Unit,
+    openGoals: () -> Unit,
+) {
+    val notice = screen.notice
+    val toAction = notice.requestKind == SuggestionKind.SMALLER
+    val focus = remember { FocusRequester() }
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(
+            stringResource(R.string.insufficient_info_title),
+            Modifier.focusRequester(focus).focusable().semantics { heading() },
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+        )
+        LaunchedEffect(notice.requestId) { focus.requestFocus() }
+        Text(notice.reason, style = MaterialTheme.typography.bodyLarge)
+        if (screen.isPrevious) Text(stringResource(R.string.insufficient_info_previous), style = MaterialTheme.typography.bodyLarge)
+        CommandButton(
+            R.string.go_back,
+            prominent = false,
+            clickLabel = stringResource(if (toAction) R.string.go_back_to_action_hint else R.string.go_back_to_goals_hint),
+        ) {
+            if (toAction) run(flow::dismissInformationNotice) else openGoals()
+        }
+    }
+}
+
+/** 확정한 목표의 행동 요청이 돌려준 미답 질문이다. 질문에 답하면 원래 요청 종류로 한 번 이어간다. */
+@Composable
+private fun ActionQuestionContent(
+    screen: ProgressScreen.ActionQuestion,
+    input: SuggestionInput?,
+    flow: ProgressFlow,
+    run: (suspend () -> Unit) -> Unit,
+    save: (suspend () -> Unit) -> Unit,
+    openGoals: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        QuestionAnswer(screen.question, R.string.goal_question_prompt, input, flow, run, save)
+        CommandButton(R.string.go_back, prominent = false, clickLabel = stringResource(R.string.go_back_to_goals_answer_hint), onClick = openGoals)
+    }
+}
+
+/** 행동 요청의 확인 질문 하나다. 나타나면 초점을 질문으로 옮긴다. 더 작게의 답은 막힘 원인으로 저장된다. */
 @Composable
 private fun QuestionAnswer(
     question: String,
+    @StringRes prompt: Int,
     input: SuggestionInput?,
     flow: ProgressFlow,
     run: (suspend () -> Unit) -> Unit,
@@ -665,7 +719,7 @@ private fun QuestionAnswer(
             AutosaveChanges(input?.text.orEmpty(), { answer.text.toString() }) { text ->
                 input?.let { save { flow.updateSuggestionInput(text, it.requestId) } }
             }
-            LabeledField(stringResource(R.string.smaller_question_prompt), answer)
+            LabeledField(stringResource(prompt), answer)
             CommandButton(R.string.answer, enabled = answer.text.isNotBlank()) {
                 val text = answer.text.toString()
                 // 누른 순간 보던 질문의 요청 ID를 넘긴다. 그사이 다음 질문이 적용됐으면 이 답은 저장하지 않는다(#424).
@@ -684,6 +738,8 @@ private val ProgressScreen.key: String
         is ProgressScreen.CurrentAction -> "currentAction-${card.id}"
         is ProgressScreen.AwaitingNextAction -> "awaitingNextAction-$problem"
         is ProgressScreen.OnHold -> "onHold-$status"
+        is ProgressScreen.InsufficientInfo -> "insufficientInfo-${notice.requestId}"
+        is ProgressScreen.ActionQuestion -> "actionQuestion-$question"
         is ProgressScreen.StoppedGoal -> "stoppedGoal"
     }
 
@@ -1004,7 +1060,7 @@ private fun ActionCardContent(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 CommandButton(R.string.complete, onClick = complete)
                 if (smallerStatus is SmallerStatus.Question) {
-                    QuestionAnswer(smallerStatus.question, suggestionInput, flow, run, save)
+                    QuestionAnswer(smallerStatus.question, R.string.smaller_question_prompt, suggestionInput, flow, run, save)
                 } else {
                     SmallerSection(smallerStatus, smaller, cancel)
                 }
@@ -1049,10 +1105,20 @@ private fun StorageFailure() {
     Text(stringResource(R.string.storage_failed), style = MaterialTheme.typography.bodyLarge)
 }
 
-/** [label]을 주면 TalkBack은 보이는 글자 대신 [label]을 읽는다. */
+/** [label]을 주면 TalkBack은 보이는 글자 대신 [label]을 읽는다. [clickLabel]은 TalkBack이 누를 때 일어날 일로 읽는 동작 레이블이다. */
 @Composable
-private fun CommandButton(@StringRes title: Int, enabled: Boolean = true, prominent: Boolean = true, label: String? = null, onClick: () -> Unit) {
-    val modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
+private fun CommandButton(
+    @StringRes title: Int,
+    enabled: Boolean = true,
+    prominent: Boolean = true,
+    label: String? = null,
+    clickLabel: String? = null,
+    onClick: () -> Unit,
+) {
+    val modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
+        // iOS 접근성 힌트에 대응한다. TalkBack이 누르면 일어날 일을 읽는다. 동작은 버튼의 것을 그대로 쓴다.
+        .then(if (clickLabel != null) Modifier.semantics { this.onClick(label = clickLabel, action = null) } else Modifier)
     val text = @Composable { Text(stringResource(title), if (label != null) Modifier.clearAndSetSemantics {} else Modifier) }
     if (prominent) {
         Button(onClick, modifier, enabled) { text() }
@@ -1136,7 +1202,7 @@ internal val SuggestionProblem.reason: Int
     }
 
 /**
- * iOS `announceChange`와 같은 조건과 문장이다. 이 단계에서 닿는 화면만 다룬다. [oldDeferred]·[deferred]는 바뀌기 전·뒤의 보류 목록이다.
+ * iOS `announceChange`와 같은 조건과 문장이다. [oldDeferred]·[deferred]는 바뀌기 전·뒤의 보류 목록이다.
  * iOS와 달리 재개한 행동이 바뀌기 전에 보류였는지도 본다. 보류 직후 대체 행동이 한 프레임 안에 오면 보류 중 화면을 건너뛰기 때문이다.
  * 그때는 재개 대신 보류를 알린다.
  */
@@ -1186,7 +1252,8 @@ internal fun announcement(old: ProgressScreen, new: ProgressScreen, oldDeferred:
             )
             // iOS와 같이 중단한 목표가 보이는 화면으로 바뀔 때마다 안내한다.
             is ProgressScreen.StoppedGoal -> add(resources.getString(R.string.announce_goal_stopped))
-            ProgressScreen.GoalInput -> Unit
+            // 정보 부족 안내와 행동 질문은 초점을 제목·질문으로 옮겨 읽힌다. 상태 안내를 따로 하지 않는다.
+            is ProgressScreen.InsufficientInfo, is ProgressScreen.ActionQuestion, ProgressScreen.GoalInput -> Unit
         }
     }
     return messages.joinToString(" ").ifEmpty { null }

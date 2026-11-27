@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.smallnext.app.data.AppDatabase
 import dev.smallnext.app.progress.SuggestionCandidate.Action
 import dev.smallnext.app.progress.SuggestionCandidate.GoalSummary
+import dev.smallnext.app.progress.SuggestionCandidate.InsufficientInfo
 import dev.smallnext.app.progress.SuggestionCandidate.NoAction
 import dev.smallnext.app.progress.SuggestionCandidate.Question
 import java.util.UUID
@@ -22,6 +23,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -102,6 +104,40 @@ class ProgressFlowTest {
     private suspend fun awaitRequest(requests: AtomicInteger) = withTimeout(5_000) { while (requests.get() == 0) delay(10) }
 
     private fun failures(vararg failures: SuggestionFailure) = failures.map { Result.failure<SuggestionCandidate>(SuggestionException(it)) }
+
+    // 정보 부족 안내와 행동 확인 질문(#356)
+
+    private val actionKinds = listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.NEXT_ACTION, SuggestionKind.REPLACEMENT)
+    private val followupKinds = actionKinds.drop(1)
+
+    /** 첫 행동이 아닌 요청은 먼저 행동 [first]를 받아야 한다. [rest]는 그다음 결과를 차례로 돌려준다. */
+    private fun scripted(kind: SuggestionKind, vararg rest: SuggestionCandidate) =
+        ScriptedProvider(*((if (kind == SuggestionKind.FIRST_ACTION) emptyList() else listOf<SuggestionCandidate>(Action(first))) + rest).toTypedArray())
+
+    /** iOS `beginActionRequest`와 같다. 목표를 확인하고 [kind] 요청의 결과가 적용될 때까지 기다린다. */
+    private suspend fun beginActionRequest(kind: SuggestionKind, provider: ActionSuggestionProvider): ProgressFlow {
+        val flow = makeFlow(provider)
+        startGoal(flow, "과거 경력 사실 정리")
+        if (kind != SuggestionKind.FIRST_ACTION) {
+            flow.awaitSuggestion()
+            when (kind) {
+                SuggestionKind.SMALLER -> flow.makeSmaller()
+                SuggestionKind.NEXT_ACTION -> flow.complete(flow.card().id)
+                SuggestionKind.REPLACEMENT -> flow.deferAction()
+                else -> throw AssertionError("행동 요청만 사용한다")
+            }
+        }
+        flow.awaitSuggestion()
+        return flow
+    }
+
+    /** 반복하는 테스트가 회차마다 빈 DB로 시작하게 한다. 이전 회차의 흐름은 더 쓰지 않는다. */
+    private fun resetDatabase() {
+        closeAll()
+        context.deleteDatabase(name)
+    }
+
+    private fun ProgressFlow.notice() = (state.value.screen as ProgressScreen.InsufficientInfo)
 
     @Test
     fun testBlankGoalCannotStart() = runBlocking {
@@ -1804,5 +1840,283 @@ class ProgressFlowTest {
         assertEquals("화분 가져오기", flow.state.value.goal?.statement)
         flow.stopGoal(expectedGoalId = secondGoal)
         assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE id = $secondGoal AND status = 'stopped'"))
+    }
+
+    // 정보 부족 안내와 행동 확인 질문(#356). 아래 테스트 이름은 iOS `ProgressFlowTests`와 같다. iOS 쪽 확인은 각 주석에 적는다.
+
+    @Test
+    fun testFirstInsufficientInfoEndsNormallyAndRestoresWithoutCallingProvider() = runBlocking {
+        val provider = ScriptedProvider(InsufficientInfo(InsufficientInfoFixture.REASON))
+        val flow = makeFlow(provider)
+        startGoal(flow, "과거 경력 사실 정리")
+        flow.awaitSuggestion()
+        val screen = flow.state.value.screen
+        assertTrue("$screen", screen is ProgressScreen.InsufficientInfo)
+        assertNull(screen.problem)
+        assertFalse(screen.isWaitingForSuggestion)
+        assertEquals(InsufficientInfoFixture.REASON, flow.notice().notice.reason)
+        assertFalse(flow.notice().isPrevious)
+        val goalId = flow.goalId()
+        flow.retrySuggestion()
+        assertEquals(screen, flow.state.value.screen)
+        flow.startNewGoal()
+        flow.selectGoal(goalId)
+        assertEquals(screen, flow.state.value.screen)
+        val reopened = makeFlow(provider)
+        assertEquals(screen, reopened.state.value.screen)
+        assertEquals("과거 경력 사실 정리", reopened.state.value.goal?.statement)
+        assertEquals(0, reopened.state.value.goals.first().completedActionCount)
+        assertEquals(listOf(SuggestionKind.FIRST_ACTION), provider.requests.map { it.kind })
+        // 안내는 실패가 아니라 정상으로 끝난 요청이다. 행동·완료·보류를 만들지 않는다.
+        assertEquals(1L, count("SELECT COUNT(*) FROM suggestion_request WHERE kind = 'first_action' AND status = 'applied'"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM action"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM completion"))
+    }
+
+    @Test
+    fun testFollowupNoticesRestoreWithoutRepeatingCompletionOrDeferral() = runBlocking {
+        for (kind in followupKinds) {
+            resetDatabase()
+            val provider = ScriptedProvider(Action(first), InsufficientInfo(InsufficientInfoFixture.REASON))
+            val flow = beginActionRequest(kind, provider)
+            val screen = flow.state.value.screen as? ProgressScreen.InsufficientInfo ?: throw AssertionError("$kind: ${flow.state.value.screen}")
+            assertEquals(kind, screen.notice.requestKind)
+            assertFalse(screen.isPrevious)
+            val goalId = flow.goalId()
+            val expectedCompleted = if (kind == SuggestionKind.NEXT_ACTION) 1 else 0
+            assertEquals(expectedCompleted, flow.state.value.goals.last().completedActionCount)
+            flow.retrySuggestion()
+            flow.startNewGoal()
+            flow.selectGoal(goalId)
+            assertEquals("$kind", screen, flow.state.value.screen)
+            assertEquals("$kind", screen, makeFlow(provider).state.value.screen)
+            assertEquals(listOf(SuggestionKind.FIRST_ACTION, kind), provider.requests.map { it.kind })
+            val last = provider.requests.last()
+            assertEquals(if (kind == SuggestionKind.NEXT_ACTION) emptyList<String>() else listOf(first.task), last.remainingTasks)
+            assertEquals(expectedCompleted, last.completedActionIds.size)
+            assertEquals(if (kind == SuggestionKind.REPLACEMENT) listOf(first.task) else emptyList<String>(), last.deferredTasks)
+        }
+    }
+
+    @Test
+    fun testActionQuestionsRestoreDraftAndSubmitOnceWithOriginalKind() = runBlocking {
+        for (kind in actionKinds) {
+            resetDatabase()
+            val provider = scripted(kind, Question(InsufficientInfoFixture.QUESTION), InsufficientInfo(InsufficientInfoFixture.REASON))
+            val flow = beginActionRequest(kind, provider)
+            val input = flow.state.value.suggestionInput ?: throw AssertionError("$kind: ${flow.state.value.screen}")
+            val questionScreen = flow.state.value.screen
+            // 첫 행동·다음 행동·대체는 행동 질문 화면이고, 더 작게는 현재 행동에 질문을 보인다.
+            if (kind == SuggestionKind.SMALLER) {
+                assertEquals(SmallerStatus.Question(InsufficientInfoFixture.QUESTION), (questionScreen as ProgressScreen.CurrentAction).smaller)
+            } else {
+                assertEquals(ProgressScreen.ActionQuestion(InsufficientInfoFixture.QUESTION), questionScreen)
+            }
+            val goalId = flow.goalId()
+            flow.updateSuggestionInput(InsufficientInfoFixture.ANSWER, input.requestId)
+            flow.startNewGoal()
+            flow.selectGoal(goalId)
+            assertEquals("$kind", questionScreen, flow.state.value.screen)
+            val reopened = makeFlow(provider)
+            assertEquals(InsufficientInfoFixture.ANSWER, reopened.state.value.suggestionInput?.text)
+            assertEquals(input.requestId, reopened.state.value.suggestionInput?.requestId)
+            assertEquals(ProgressFlowException.Reason.EMPTY_ANSWER, (failure { reopened.answerQuestion(" \n") } as ProgressFlowException).reason)
+            reopened.answerQuestion(InsufficientInfoFixture.ANSWER)
+            reopened.answerQuestion(InsufficientInfoFixture.ANSWER)
+            assertTrue(failure { reopened.updateSuggestionInput("늦은 입력", input.requestId) } is ProgressFlowException)
+            reopened.awaitSuggestion()
+            val screen = reopened.state.value.screen as? ProgressScreen.InsufficientInfo ?: throw AssertionError("$kind: ${reopened.state.value.screen}")
+            assertEquals(kind, screen.notice.requestKind)
+            assertFalse("$kind", screen.isPrevious)
+            assertEquals(
+                (if (kind == SuggestionKind.FIRST_ACTION) emptyList() else listOf(SuggestionKind.FIRST_ACTION)) + listOf(kind, kind),
+                provider.requests.map { it.kind },
+            )
+            val last = provider.requests.last()
+            assertEquals(if (kind == SuggestionKind.SMALLER) InsufficientInfoFixture.ANSWER else null, last.blocker)
+            assertEquals(emptyList<GoalAnswer>(), last.context.answers)
+            assertEquals(listOf(GoalAnswer(InsufficientInfoFixture.QUESTION, InsufficientInfoFixture.ANSWER)), last.actionAnswers)
+            assertEquals(if (kind == SuggestionKind.NEXT_ACTION) 1 else 0, last.completedActionIds.size)
+            assertEquals(if (kind == SuggestionKind.REPLACEMENT) listOf(first.task) else emptyList<String>(), last.deferredTasks)
+        }
+    }
+
+    @Test
+    fun testSmallerNoticeReturnsToPreservedActionAndKeepsDraftThroughCommands() = runBlocking {
+        val provider = ScriptedProvider(Action(first), InsufficientInfo(InsufficientInfoFixture.REASON), Action(second))
+        val flow = makeFlow(provider)
+        startGoal(flow, "경력 정리")
+        flow.awaitSuggestion()
+        val card = flow.card()
+        flow.recordResult("자료 미기재를 확인함", card.id)
+        flow.updateDraft("기억나는 내용 초안", card.id)
+        val original = flow.state.value.screen
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val notice = flow.state.value.screen
+        assertTrue("$notice", notice is ProgressScreen.InsufficientInfo)
+        flow.dismissInformationNotice()
+        assertEquals(original, flow.state.value.screen)
+        flow.updateDraft("바꾼 초안", card.id)
+        val restored = flow.state.value.screen as ProgressScreen.CurrentAction
+        assertNull(restored.smaller)
+        assertEquals(listOf("자료 미기재를 확인함"), restored.card.results.map { it.body })
+        assertEquals("바꾼 초안", restored.card.draft)
+        // 닫은 상태는 이번 실행에서만 유지한다. 다시 열면 보존한 안내가 복구된다.
+        assertEquals(notice, makeFlow(provider).state.value.screen)
+        val goalId = flow.goalId()
+        flow.startNewGoal()
+        flow.selectGoal(goalId)
+        assertEquals(notice, flow.state.value.screen)
+        flow.dismissInformationNotice()
+        flow.complete(flow.card().id)
+        flow.awaitSuggestion()
+        assertEquals(1, flow.state.value.goals.last().completedActionCount)
+        assertEquals(listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.NEXT_ACTION), provider.requests.map { it.kind })
+    }
+
+    // iOS에는 없는 확인이다. 닫기는 더 작게 요청의 안내에만 있고, 다른 종류의 안내는 닫아도 화면과 안내가 그대로다.
+    @Test
+    fun testOnlySmallerNoticeCanBeDismissed() = runBlocking {
+        for (kind in actionKinds) {
+            resetDatabase()
+            val provider = scripted(kind, InsufficientInfo(InsufficientInfoFixture.REASON))
+            val flow = beginActionRequest(kind, provider)
+            val screen = flow.state.value.screen
+            assertEquals(kind, flow.notice().notice.requestKind)
+            flow.dismissInformationNotice()
+            if (kind == SuggestionKind.SMALLER) {
+                assertTrue("$kind", flow.state.value.screen is ProgressScreen.CurrentAction)
+            } else {
+                assertEquals("$kind", screen, flow.state.value.screen)
+            }
+            assertEquals("$kind", screen, makeFlow(provider).state.value.screen)
+        }
+    }
+
+    @Test
+    fun testOversizedActionAnswerKeepsQuestionDraftAndAllowsCorrection() = runBlocking {
+        for (kind in actionKinds) {
+            resetDatabase()
+            val provider = scripted(kind, Question("기록이 있나요?"), Action(second))
+            val flow = beginActionRequest(kind, provider)
+            val original = flow.state.value.screen
+            val input = flow.state.value.suggestionInput!!
+            // 더 작게의 답은 막힘 원인으로 저장돼 2KiB, 다른 답은 요청 본문 32KiB를 넘으면 보낼 수 없다.
+            val text = "가".repeat(if (kind == SuggestionKind.SMALLER) 700 else 11_000)
+            flow.updateSuggestionInput(text, input.requestId)
+            val error = failure { flow.answerQuestion(text) }
+            assertEquals("$kind", ProgressFlowException.Reason.ANSWER_EXCEEDS_REQUEST_LIMIT, (error as ProgressFlowException).reason)
+            assertEquals("$kind", original, flow.state.value.screen)
+            val reopened = makeFlow(provider)
+            assertEquals("$kind", original, reopened.state.value.screen)
+            assertEquals(text, reopened.state.value.suggestionInput?.text)
+            assertEquals(if (kind == SuggestionKind.FIRST_ACTION) 1 else 2, provider.requests.size)
+            assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request WHERE answer IS NOT NULL"))
+            reopened.answerQuestion("기억나지 않고 자료도 없어요")
+            reopened.awaitSuggestion()
+            val action = reopened.state.value.screen as? ProgressScreen.CurrentAction ?: throw AssertionError("$kind: ${reopened.state.value.screen}")
+            assertNull(action.smaller)
+            assertEquals(second.task, action.card.task)
+            assertEquals(listOf("기억나지 않고 자료도 없어요"), provider.requests.last().actionAnswers.map { it.answer })
+        }
+    }
+
+    @Test
+    fun testAnsweredQuestionsCannotRepeatOrBecomeOtherKindsOfAnswers() = runBlocking {
+        for (kind in actionKinds) {
+            resetDatabase()
+            val repeated = "어느 자료를 확인할 수 있나요?"
+            val provider = scripted(kind, Question(repeated), Question(" $repeated "))
+            val flow = beginActionRequest(kind, provider)
+            flow.answerQuestion("확인할 자료가 없어요")
+            flow.awaitSuggestion()
+            val screen = flow.state.value.screen
+            if (screen is ProgressScreen.CurrentAction) {
+                assertEquals("$kind", SmallerStatus.Problem(SuggestionProblem.Unsuitable), screen.smaller)
+            } else {
+                assertEquals("$kind: $screen", SuggestionProblem.Unsuitable, screen.problem)
+            }
+            assertNull(flow.state.value.suggestionInput)
+            assertEquals(if (kind == SuggestionKind.FIRST_ACTION) 2 else 3, provider.requests.size)
+        }
+    }
+
+    @Test
+    fun testPendingQuestionAnswerNeverReplaysOrAppliesAfterLeavingItsState() = runBlocking {
+        for (kind in actionKinds) {
+            for (event in listOf("cancel", "switch", "edit", "reopen", "stop")) {
+                resetDatabase()
+                val provider = scripted(kind, Question("확인할 자료가 있나요?"))
+                beginActionRequest(kind, provider)
+                val held = HeldProvider(Action(second))
+                val flow = makeFlow(held)
+                flow.answerQuestion("모르고 자료도 없어요")
+                flow.answerQuestion("중복 답")
+                awaitRequest(held.requests)
+                when (event) {
+                    "cancel" -> flow.cancelSuggestion()
+                    "switch" -> flow.startNewGoal()
+                    "edit" -> flow.editGoalStatement("다른 경력 정리")
+                    "reopen" -> makeFlow(UnavailableSuggestionProvider)
+                    else -> flow.stopGoal()
+                }
+                held.release()
+                flow.awaitSuggestion()
+                (flow.state.value.screen as? ProgressScreen.CurrentAction)?.let { assertNotEquals("$kind/$event", second.task, it.card.task) }
+                (makeFlow(provider).state.value.screen as? ProgressScreen.CurrentAction)?.let { assertNotEquals("$kind/$event", second.task, it.card.task) }
+                assertEquals("$kind/$event", 1, held.requests.get())
+            }
+        }
+    }
+
+    @Test
+    fun testLateInsufficientInfoCannotReplaceCancelledSwitchedChangedOrInterruptedState() = runBlocking {
+        for (event in listOf("cancel", "switch", "revision", "reopen", "stop", "delete")) {
+            resetDatabase()
+            val held = HeldProvider(InsufficientInfo(InsufficientInfoFixture.REASON))
+            val flow = makeFlow(held)
+            startGoal(flow, "늦은 안내 $event")
+            awaitRequest(held.requests)
+            when (event) {
+                "cancel" -> flow.cancelSuggestion()
+                "switch" -> flow.startNewGoal()
+                "revision" -> probe.execSQL("UPDATE goal SET revision = revision + 1")
+                "reopen" -> makeFlow(UnavailableSuggestionProvider)
+                "stop" -> flow.stopGoal()
+                else -> flow.deleteGoal(flow.goalId(), confirmed = true)
+            }
+            held.release()
+            flow.awaitSuggestion()
+            assertFalse("late notice applied after $event", flow.state.value.screen is ProgressScreen.InsufficientInfo)
+            assertFalse("late notice restored after $event", makeFlow(UnavailableSuggestionProvider).state.value.screen is ProgressScreen.InsufficientInfo)
+            assertEquals(event, 1, held.requests.get())
+            assertEquals(event, 0L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` LIKE 'supplemental_context:%'"))
+        }
+    }
+
+    @Test
+    fun testUnsavedInsufficientInfoRemainsFailureUntilSuccessfullySaved() = runBlocking {
+        val provider = ScriptedProvider(InsufficientInfo(InsufficientInfoFixture.REASON), InsufficientInfo(InsufficientInfoFixture.REASON))
+        val flow = makeFlow(provider)
+        // iOS는 공급자가 DB 잠금을 쥐어 저장을 막는다. 여기서는 안내 메타데이터 저장만 거부하는 트리거로 같은 실패를 만든다.
+        probe.execSQL(
+            "CREATE TRIGGER reject_notice_save BEFORE INSERT ON app_metadata WHEN NEW.`key` LIKE 'supplemental_context:%' " +
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+        )
+        startGoal(flow, "과거 경력 사실 정리")
+        flow.awaitSuggestion()
+        assertEquals(
+            ProgressScreen.AwaitingFirstAction("과거 경력 사실 정리", SuggestionProblem.Failure(SuggestionFailure.FAILED)),
+            flow.state.value.screen,
+        )
+        probe.execSQL("DROP TRIGGER reject_notice_save")
+        assertEquals(0L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` LIKE 'supplemental_context:%'"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request WHERE status = 'applied' AND kind = 'first_action'"))
+        flow.retrySuggestion()
+        flow.awaitSuggestion()
+        assertTrue("${flow.state.value.screen}", flow.state.value.screen is ProgressScreen.InsufficientInfo)
+        assertEquals(flow.state.value.screen, makeFlow(UnavailableSuggestionProvider).state.value.screen)
+        assertEquals(2, provider.requests.size)
     }
 }
