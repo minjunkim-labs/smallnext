@@ -208,16 +208,16 @@
       "prefix_sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"
     },
     ".github/pull_request_template.md": {
-      "sha256": "11a271edeca42572a39a609c9b739a08ab9258c9509e23020a1a4d586df48f02"
+      "sha256": "093b514f391e73dfc4de4d4f84db8297d635ba176484b183d2606032a2d3beaa"
     },
     "AGENTS.md": {
-      "block_sha256": "9b299b649b2f8381c32addded8ead96a2fa48e3f78e44620f3f729bc9806f209"
+      "block_sha256": "1492f3d676395887479dd805ead043f844f85a235fe152fa9995de8fbc617cb7"
     },
     "CLAUDE.md": {
       "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
     },
     "REVIEW.md": {
-      "block_sha256": "25b2312c47d48ad39f14cd413895cc088d45042d96ce8013b0712bfe726d52a7"
+      "block_sha256": "f5e1101fdcf937fa32494640097281009ef1e2fdd27f4ab0c93f0f12fb0c355f"
     },
     "docs/agents/LICENSE": {
       "sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
@@ -235,5 +235,5 @@
   "profiles": [
     "ops"
   ],
-  "version": "2.1.0"
+  "version": "2.3.0"
 }
