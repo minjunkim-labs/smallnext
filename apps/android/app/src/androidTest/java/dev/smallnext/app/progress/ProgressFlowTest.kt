@@ -831,6 +831,42 @@ class ProgressFlowTest {
         assertEquals("어떤 자료를 봐야 할지 모름", provider.requests[2].blocker)
     }
 
+    // #424: 화면이 '답하기'를 누른 순간 보던 질문의 요청 ID를 넘긴다. iOS는 명령이 메인 스레드에서 끊김 없이 실행돼 이 틈이 없다.
+    @Test
+    fun testAnswerToAnEarlierQuestionIsNotSavedAfterTheNextQuestionIsApplied() = runBlocking {
+        val next = "어떤 자료가 먼저 필요한가요?"
+        val provider = ScriptedProvider(Action(first), Question(question), Question(next), Action(smaller))
+        val flow = makeFlow(provider)
+        val source = firstCard(flow)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val earlier = flow.state.value.suggestionInput!!.requestId
+
+        // 답하기를 누른 뒤 명령이 처리되기 전에 같은 행동의 다음 '더 작게' 질문이 먼저 적용된다.
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val latest = flow.state.value.suggestionInput!!.requestId
+        assertTrue(earlier != latest)
+        assertEquals(current(source, SmallerStatus.Question(next)), flow.state.value.screen)
+
+        flow.run(Drafts(answer = "앞 질문의 답", requestId = earlier)) { flow.answerQuestion("앞 질문의 답", earlier) }
+        // 새 질문과 그 입력 초안, 막힘 원인은 그대로이고 새 요청도 보내지 않는다.
+        assertEquals(current(source, SmallerStatus.Question(next)), flow.state.value.screen)
+        assertEquals(SuggestionInput(latest, null), flow.state.value.suggestionInput)
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request WHERE answer IS NOT NULL"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM goal WHERE blocker IS NOT NULL"))
+        assertEquals(3, provider.requests.size)
+
+        // 지금 질문의 요청 ID로는 저장한다. `Waiting` 전이는 ungated 공급자 결과와 경쟁하므로 여기서 보지 않는다
+        // (testQuestionAnswerIsSavedAsBlockerAndSentWithNextRequest가 확인한다). 결과 적용을 기다린 뒤 최종 상태를 본다.
+        flow.run(Drafts(answer = "자료 위치를 모름", requestId = latest)) { flow.answerQuestion("자료 위치를 모름", latest) }
+        flow.awaitSuggestion()
+        assertEquals(smaller.task, flow.card().task)
+        assertEquals(1L, count("SELECT COUNT(*) FROM goal WHERE blocker = '자료 위치를 모름'"))
+        assertEquals(1L, count("SELECT COUNT(*) FROM suggestion_request WHERE answer = '자료 위치를 모름'"))
+        assertEquals("자료 위치를 모름", provider.requests[3].blocker)
+    }
+
     @Test
     fun testUndoWhileWaitingEndsRequestAndSmallerCanStartAgain() = runBlocking {
         val setup = makeFlow(ScriptedProvider(Action(first), Action(smaller)))

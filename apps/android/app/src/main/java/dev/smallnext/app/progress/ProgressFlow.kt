@@ -29,8 +29,16 @@ data class GoalInput(
     val availableMinutes: String = "",
 )
 
-/** 화면에 남은 입력 초안이다. 명령 전에 현재 화면에 해당하는 값만 저장한다(iOS `Drafts`). */
-data class Drafts(val goalInput: GoalInput = GoalInput(), val answer: String = "", val completionCriteria: String = "")
+/**
+ * 화면에 남은 입력 초안이다. 명령 전에 현재 화면에 해당하는 값만 저장한다(iOS `Drafts`).
+ * [requestId]를 주면 화면이 본 질문의 요청 ID다. 그사이 질문이 바뀌었으면 [answer]·[completionCriteria]를 저장하지 않는다.
+ */
+data class Drafts(
+    val goalInput: GoalInput = GoalInput(),
+    val answer: String = "",
+    val completionCriteria: String = "",
+    val requestId: Long? = null,
+)
 
 /** 확인 질문의 답이나 수정 중인 완료 조건의 초안이다. [text]가 null이면 아직 저장한 초안이 없다. */
 data class SuggestionInput(val requestId: Long, val text: String?)
@@ -164,7 +172,7 @@ class ProgressFlow private constructor(
     }
 
     private suspend fun save(drafts: Drafts) {
-        state.value.suggestionInput?.let { input ->
+        state.value.suggestionInput?.takeIf { drafts.requestId == null || drafts.requestId == it.requestId }?.let { input ->
             val criteria = (state.value.screen as? ProgressScreen.PreparingGoal)?.completionCriteria
             val (text, saved) = if (criteria != null) drafts.completionCriteria to (input.text ?: criteria) else drafts.answer to (input.text ?: "")
             if (text != saved) updateSuggestionInput(text, input.requestId)
@@ -334,9 +342,14 @@ class ProgressFlow private constructor(
         }
     }
 
-    /** 실제 질문의 답을 원래 요청에 저장하고 같은 종류를 한 번 요청한다. 더 작게의 답만 막힘으로 확정한다. */
-    suspend fun answerQuestion(text: String) = serially {
+    /**
+     * 실제 질문의 답을 원래 요청에 저장하고 같은 종류를 한 번 요청한다. 더 작게의 답만 막힘으로 확정한다.
+     * [requestId]를 주면 그 요청의 질문일 때만 저장한다. 화면은 '답하기'를 누른 순간 보던 질문의 요청 ID를 넘긴다.
+     * 그사이 다음 질문이 먼저 적용됐으면 앞 질문의 답은 저장하지 않고 새 질문과 막힘 원인도 바꾸지 않는다(#424).
+     */
+    suspend fun answerQuestion(text: String, requestId: Long? = null) = serially {
         if ((state.value.screen as? ProgressScreen.CurrentAction)?.smaller !is SmallerStatus.Question) return@serially
+        if (requestId != null && requestId != state.value.suggestionInput?.requestId) return@serially
         val answer = nonempty(text) ?: fail(ProgressFlowException.Reason.EMPTY_ANSWER)
         val input = state.value.suggestionInput ?: fail(ProgressFlowException.Reason.GOAL_NOT_READY)
         perform { db ->
