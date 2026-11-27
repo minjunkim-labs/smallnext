@@ -1320,9 +1320,11 @@ class ProgressFlowTest {
     /** #435: 되돌려 보류한 작은 행동을 재개해 완료하면, 원본이 다시 나뉜 동안에도 다음 행동 요청에 원본을 담지 않는다. */
     @Test
     fun testNextActionAfterResumedUndoneSmallActionHasNoSourceContext() = runBlocking {
-        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(smaller), Action(smaller))
+        val fourth = ProposedAction("메모 한 줄 덧붙이기", "한 줄이 적혀 있다", 1)
+        val fifth = ProposedAction("메모 날짜 적기", "날짜가 적혀 있다", 1)
+        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(fourth), Action(fifth))
         val flow = makeFlow(provider)
-        firstCard(flow)
+        val source = firstCard(flow)
         flow.makeSmaller()
         flow.awaitSuggestion()
         val undone = flow.card()
@@ -1331,12 +1333,15 @@ class ProgressFlowTest {
         flow.awaitSuggestion()
         val latest = flow.card()
 
+        // 카드와 요청 맥락이 같은 기준을 쓴다. 되돌려 보류한 작은 행동에는 원본 관계가 없다.
         flow.resume(undone.id)
+        assertNull(flow.card().origin)
         flow.complete(undone.id)
         flow.awaitSuggestion()
 
         // 되돌리지 않고 보류만 한 가장 최근 분할을 완료하면 원본이 맥락에 실린다.
         flow.resume(latest.id)
+        assertEquals(source.id, flow.card().origin?.id)
         flow.complete(latest.id)
         flow.awaitSuggestion()
 
@@ -1351,9 +1356,11 @@ class ProgressFlowTest {
     /** #435: 되돌려 보류한 작은 행동을 재개해 더 작게 하면, 원본이 다시 나뉜 동안에도 분할 원본 목록에 원본을 담지 않는다. */
     @Test
     fun testSmallerAfterResumedUndoneSmallActionSendsNoSplitSource() = runBlocking {
-        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(smaller), Action(smaller))
+        val fourth = ProposedAction("메모 한 줄 덧붙이기", "한 줄이 적혀 있다", 1)
+        val fifth = ProposedAction("메모 날짜 적기", "날짜가 적혀 있다", 1)
+        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(fourth), Action(fifth))
         val flow = makeFlow(provider)
-        firstCard(flow)
+        val source = firstCard(flow)
         flow.makeSmaller()
         flow.awaitSuggestion()
         val undone = flow.card()
@@ -1363,11 +1370,13 @@ class ProgressFlowTest {
         val latest = flow.card()
 
         flow.resume(undone.id)
+        assertNull(flow.card().origin)
         flow.makeSmaller()
         flow.awaitSuggestion()
 
         // 되돌리지 않고 보류만 한 가장 최근 분할은 재개한 뒤에도 분할 원본을 담는다.
         flow.resume(latest.id)
+        assertEquals(source.id, flow.card().origin?.id)
         flow.makeSmaller()
         flow.awaitSuggestion()
 
