@@ -1108,16 +1108,23 @@ public final class ProgressFlow {
         ).map { ActionCard(id: $0["id"], task: $0["task"], doneWhen: $0["done_when"], estimatedMinutes: $0["estimated_minutes"]) }
     }
 
+    /// 행동 `a`와 그 분할 원본 `p`가 카드의 `origin`·다음 행동 맥락·분할 원본 목록에서 관계로 인정되는 조건이다.
+    /// 원본이 `split`이고 `a`가 원본의 가장 최근 분할일 때만 인정한다. 되돌려 보류한 작은 행동(원본에 더 새로운
+    /// 분할이 있는 경우)과 보류·완료한 원본은 뺀다. 세 조회가 같은 기준을 쓰도록 한곳에 둔다.
+    private nonisolated static let splitSourceLink = """
+        p.status = 'split' AND NOT EXISTS (SELECT 1 FROM action n WHERE n.split_from_id = p.id AND n.id > a.id)
+        """
+
     private nonisolated static func splitSources(_ db: Database, goalID: Int64) throws -> [String] {
         try String.fetchAll(
             db,
             sql: """
             WITH RECURSIVE source(id, task, depth) AS (
-                SELECT p.id, p.task, 1 FROM action a JOIN action p ON p.id = a.split_from_id
+                SELECT p.id, p.task, 1 FROM action a JOIN action p ON p.id = a.split_from_id AND \(splitSourceLink)
                 WHERE a.goal_id = ? AND a.status = 'current'
                 UNION ALL
                 SELECT p.id, p.task, s.depth + 1 FROM source s
-                JOIN action a ON a.id = s.id JOIN action p ON p.id = a.split_from_id
+                JOIN action a ON a.id = s.id JOIN action p ON p.id = a.split_from_id AND \(splitSourceLink)
             )
             SELECT task FROM source ORDER BY depth DESC
             """,
@@ -1125,7 +1132,7 @@ public final class ProgressFlow {
         )
     }
 
-    /// 더 작게는 현재 행동을, 다음 행동은 방금 완료한 작은 행동의 분할 원본을 담는다.
+    /// 더 작게는 현재 행동을, 다음 행동은 방금 완료한 작은 행동의 분할 원본을 담는다. 원본은 카드의 `origin`과 같은 기준으로만 담는다.
     private nonisolated static func contextAction(_ db: Database, goalID: Int64, kind: SuggestionKind) throws -> ProposedAction? {
         let sql: String
         switch kind {
@@ -1135,7 +1142,7 @@ public final class ProgressFlow {
             sql = """
             SELECT p.task, p.done_when, p.estimated_minutes FROM completion c
             JOIN action a ON a.id = c.action_id
-            LEFT JOIN action p ON p.id = a.split_from_id AND p.status = 'split'
+            LEFT JOIN action p ON p.id = a.split_from_id AND \(splitSourceLink)
             WHERE a.goal_id = ? ORDER BY c.id DESC LIMIT 1
             """
         case .goalPreparation, .firstAction, .replacement:
@@ -1203,8 +1210,7 @@ public final class ProgressFlow {
             SELECT a.id, a.task, a.done_when, a.estimated_minutes, a.target_name, a.target_description, a.material_links,
                    a.split_from_id, p.task AS source_task, g.revision
             FROM action a JOIN goal g ON g.id = a.goal_id
-            LEFT JOIN action p ON p.id = a.split_from_id AND p.status = 'split'
-                AND NOT EXISTS (SELECT 1 FROM action n WHERE n.split_from_id = p.id AND n.id > a.id)
+            LEFT JOIN action p ON p.id = a.split_from_id AND \(splitSourceLink)
             WHERE a.goal_id = ? AND a.status = 'current'
             """,
             arguments: [goalID]

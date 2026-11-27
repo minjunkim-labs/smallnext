@@ -1317,6 +1317,70 @@ class ProgressFlowTest {
         assertEquals(source.id, flow.card().id)
     }
 
+    /** #435: 되돌려 보류한 작은 행동을 재개해 완료하면, 원본이 다시 나뉜 동안에도 다음 행동 요청에 원본을 담지 않는다. */
+    @Test
+    fun testNextActionAfterResumedUndoneSmallActionHasNoSourceContext() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(smaller), Action(smaller))
+        val flow = makeFlow(provider)
+        firstCard(flow)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val undone = flow.card()
+        flow.undoSplit()
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val latest = flow.card()
+
+        flow.resume(undone.id)
+        flow.complete(undone.id)
+        flow.awaitSuggestion()
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할을 완료하면 원본이 맥락에 실린다.
+        flow.resume(latest.id)
+        flow.complete(latest.id)
+        flow.awaitSuggestion()
+
+        assertEquals(
+            listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.SMALLER, SuggestionKind.NEXT_ACTION, SuggestionKind.NEXT_ACTION),
+            provider.requests.map { it.kind },
+        )
+        assertNull(provider.requests[3].currentAction)
+        assertEquals(card(first), provider.requests[4].currentAction)
+    }
+
+    /** #435: 되돌려 보류한 작은 행동을 재개해 더 작게 하면, 원본이 다시 나뉜 동안에도 분할 원본 목록에 원본을 담지 않는다. */
+    @Test
+    fun testSmallerAfterResumedUndoneSmallActionSendsNoSplitSource() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(smaller), Action(third), Action(smaller), Action(smaller))
+        val flow = makeFlow(provider)
+        firstCard(flow)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val undone = flow.card()
+        flow.undoSplit()
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+        val latest = flow.card()
+
+        flow.resume(undone.id)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할은 재개한 뒤에도 분할 원본을 담는다.
+        flow.resume(latest.id)
+        flow.makeSmaller()
+        flow.awaitSuggestion()
+
+        assertEquals(
+            listOf(SuggestionKind.FIRST_ACTION, SuggestionKind.SMALLER, SuggestionKind.SMALLER, SuggestionKind.SMALLER, SuggestionKind.SMALLER),
+            provider.requests.map { it.kind },
+        )
+        assertEquals(card(smaller), provider.requests[3].currentAction)
+        assertEquals(emptyList<String>(), provider.requests[3].splitSources)
+        assertEquals(card(third), provider.requests[4].currentAction)
+        assertEquals(listOf(first.task), provider.requests[4].splitSources)
+    }
+
     @Test
     fun testRecordedResultAndNewDraftSurviveDeferAndResume() = runBlocking {
         val flow = makeFlow(ScriptedProvider(Action(first), NoAction))

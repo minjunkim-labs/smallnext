@@ -647,6 +647,14 @@ class ProgressFlow private constructor(
         private const val SUGGESTION_INPUT = "suggestion_input"
         private const val SELECTED_GOAL_ID = "selected_goal_id"
         private const val UNSUITABLE = "unsuitable"
+
+        /**
+         * 행동 `a`와 그 분할 원본 `p`가 카드의 `origin`·다음 행동 맥락·분할 원본 목록에서 관계로 인정되는 조건이다.
+         * 원본이 `split`이고 `a`가 원본의 가장 최근 분할일 때만 인정한다. 되돌려 보류한 작은 행동(원본에 더 새로운
+         * 분할이 있는 경우)과 보류·완료한 원본은 뺀다. 세 조회가 같은 기준을 쓰도록 한곳에 둔다.
+         */
+        private const val SPLIT_SOURCE_LINK =
+            "p.status = 'split' AND NOT EXISTS (SELECT 1 FROM action n WHERE n.split_from_id = p.id AND n.id > a.id)"
         private val gson = Gson()
         private val stringList = object : TypeToken<List<String>>() {}.type
 
@@ -786,7 +794,7 @@ class ProgressFlow private constructor(
             )
         }
 
-        /** 더 작게는 현재 행동을, 다음 행동은 방금 완료한 작은 행동의 분할 원본을 담는다. */
+        /** 더 작게는 현재 행동을, 다음 행동은 방금 완료한 작은 행동의 분할 원본을 담는다. 원본은 카드의 `origin`과 같은 기준으로만 담는다. */
         private fun contextAction(db: SupportSQLiteDatabase, goalId: Long, kind: SuggestionKind): ProposedAction? {
             val sql = when (kind) {
                 SuggestionKind.SMALLER -> "SELECT task, done_when, estimated_minutes FROM action WHERE goal_id = ? AND status = 'current'"
@@ -794,7 +802,7 @@ class ProgressFlow private constructor(
                     """
                     SELECT p.task, p.done_when, p.estimated_minutes FROM completion c
                     JOIN action a ON a.id = c.action_id
-                    LEFT JOIN action p ON p.id = a.split_from_id AND p.status = 'split'
+                    LEFT JOIN action p ON p.id = a.split_from_id AND $SPLIT_SOURCE_LINK
                     WHERE a.goal_id = ? ORDER BY c.id DESC LIMIT 1
                     """
                 SuggestionKind.GOAL_PREPARATION, SuggestionKind.FIRST_ACTION, SuggestionKind.REPLACEMENT -> return null
@@ -806,11 +814,11 @@ class ProgressFlow private constructor(
         private fun splitSources(db: SupportSQLiteDatabase, goalId: Long) = db.strings(
             """
             WITH RECURSIVE source(id, task, depth) AS (
-                SELECT p.id, p.task, 1 FROM action a JOIN action p ON p.id = a.split_from_id
+                SELECT p.id, p.task, 1 FROM action a JOIN action p ON p.id = a.split_from_id AND $SPLIT_SOURCE_LINK
                 WHERE a.goal_id = ? AND a.status = 'current'
                 UNION ALL
                 SELECT p.id, p.task, s.depth + 1 FROM source s
-                JOIN action a ON a.id = s.id JOIN action p ON p.id = a.split_from_id
+                JOIN action a ON a.id = s.id JOIN action p ON p.id = a.split_from_id AND $SPLIT_SOURCE_LINK
             )
             SELECT task FROM source ORDER BY depth DESC
             """,
@@ -940,8 +948,7 @@ class ProgressFlow private constructor(
         private fun loadCard(db: SupportSQLiteDatabase, goalId: Long): ActionCard? {
             val card = db.query(
                 "SELECT a.id, a.task, a.done_when, a.estimated_minutes, a.target_name, a.target_description, a.material_links, " +
-                    "a.split_from_id, p.task FROM action a LEFT JOIN action p ON p.id = a.split_from_id AND p.status = 'split' " +
-                    "AND NOT EXISTS (SELECT 1 FROM action n WHERE n.split_from_id = p.id AND n.id > a.id) " +
+                    "a.split_from_id, p.task FROM action a LEFT JOIN action p ON p.id = a.split_from_id AND $SPLIT_SOURCE_LINK " +
                     "WHERE a.goal_id = ? AND a.status = 'current'",
                 goalId,
             ) {
