@@ -22,7 +22,7 @@ import tempfile
 import time
 from urllib.parse import quote
 
-VERSION = "2.1.0"
+VERSION = "2.3.0"
 START, END = b"<!-- baseline:start -->\n", b"<!-- baseline:end -->\n"
 ENV_IGNORE = (".env", ".env.*", "!.env.example", "*.pem", "*.key", "*.p12")  # the v1 core gitignore had the same
 ENV_SAMPLES = (".env", ".env.local", "a.pem", "a.key", "a.p12")
@@ -33,10 +33,10 @@ ENV_SAMPLES = (".env", ".env.local", "a.pem", "a.key", "a.p12")
 # lines at the top, seed_sha256 everything (written only when missing, never checked or upgraded).
 MANAGED = {
     ".gitattributes": {"prefix_sha256": "d60f352d0db1404c70afb4bb8b2ca3fd1c610572aa40720e8a0b7baa7885418c"},
-    "AGENTS.md": {"block_sha256": "9b299b649b2f8381c32addded8ead96a2fa48e3f78e44620f3f729bc9806f209"},
+    "AGENTS.md": {"block_sha256": "1492f3d676395887479dd805ead043f844f85a235fe152fa9995de8fbc617cb7"},
     "CLAUDE.md": {"sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"},
-    "REVIEW.md": {"block_sha256": "25b2312c47d48ad39f14cd413895cc088d45042d96ce8013b0712bfe726d52a7"},
-    ".github/pull_request_template.md": {"sha256": "11a271edeca42572a39a609c9b739a08ab9258c9509e23020a1a4d586df48f02"},
+    "REVIEW.md": {"block_sha256": "f5e1101fdcf937fa32494640097281009ef1e2fdd27f4ab0c93f0f12fb0c355f"},
+    ".github/pull_request_template.md": {"sha256": "093b514f391e73dfc4de4d4f84db8297d635ba176484b183d2606032a2d3beaa"},
     ".claude/hooks/allow_enqueue.py": {"sha256": "55b4aeb5b60231948c9f6fe5190878ce9955114d4a8d87e55be33d9f27f3b5e7"},
     ".claude/hooks/check.py": {"sha256": "6b27ea25423c46e4cd0acd2510b7b4b1d0ee6ae6f38f8f4307a37ce6b1b3b758"},
     "docs/agents/issue-tracker.md": {"seed_sha256": "6fdb3e9b00b7b0b115ecac3b1c00e3790f637f190abf598815368722c0a94692"},
@@ -154,6 +154,8 @@ MANIFESTS = {
 }
 # enqueue
 GRADES = ("문서", "쉬움", "어려움")
+# POLICY §3: the reviewer's model tier and effort per grade. Never model names (ADR 0002).
+REVIEW_TIERS = {"문서": None, "쉬움": {"model": "보통", "effort": "보통"}, "어려움": {"model": "무거움", "effort": "높음"}}
 STANDING = "- 상시 지시:"
 STANDING_COMMAND = "`python3 -I .baseline/baseline.py enqueue <PR> <리뷰한 head>`"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -161,7 +163,7 @@ PASSED = {"success", "neutral", "skipped"}
 PR_QUERY = ("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest("
             "number:$number){id body createdAt userContentEdits(last:100){nodes{editedAt editor{__typename}}} "
             "reviewThreads(first:100){totalCount nodes{id isResolved comments(first:100){nodes{databaseId}}}}}}}")
-REPORT_FIELDS = ("리뷰어", "리뷰한 head:", "등급:", "고친 것:", "남은 지적:", "외부 리뷰 판정:")
+REPORT_FIELDS = ("리뷰어", "리뷰한 head:", "리뷰한 모델:", "등급:", "고친 것:", "남은 지적:", "외부 리뷰 판정:")
 RESOLVE = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}"
 ENQUEUE = ("mutation($id:ID!,$sha:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$sha})"
            "{mergeQueueEntry{position}}}")
@@ -309,6 +311,9 @@ def core_files(commands):
     files = {p.relative_to(core).as_posix(): p.read_bytes() for p in sorted(core.rglob("*")) if p.is_file()}
     files.update({rel: source(rel).read_bytes() for rel in MANAGED if rel.startswith(SKILLS)})
     files[".baseline/baseline.py"] = Path(__file__).read_bytes()
+    # core/ holds a placeholder pin, so a change to this script never has to touch core/.claude/settings.json.
+    files[".claude/settings.json"] = re.sub(rb'("--sha256",\s*")[0-9a-f]{64}"', b'\\g<1>' + sha256(files[".baseline/baseline.py"]).encode()
+                                            + b'"', files[".claude/settings.json"])
     files[".baseline/commands.json"] = dump_json(commands)
     files[".baseline/baseline.json"] = dump_json({"version": VERSION, "profiles": [], "managed": MANAGED})
     return files
@@ -510,6 +515,15 @@ def migrate_agents(data, core_data, extra, blocks, notes):
     if new is None:
         blocks.append("AGENTS.md: 관리 블록 표시가 하나씩 있어야 한다")
         return None, drafts
+    # The line is core's default (POLICY: the owner deletes it to opt out); enqueue reads it from base.
+    standing = [line for line in new.decode("utf-8").splitlines() if line.startswith(STANDING)]
+    if not standing:
+        core = core_data.decode("utf-8")
+        new = insert_before_block(new, core[core.index("## 병합\n"):core.index(START.decode())].encode("utf-8"))
+        notes.append("AGENTS.md: 상시 지시 줄이 없어 코어의 「병합」 절을 블록 앞에 더한다. 끄려면 그 줄을 지운다")
+    elif not any(STANDING_COMMAND in line for line in standing):
+        notes.append(f"AGENTS.md: 상시 지시 줄에 {STANDING_COMMAND}이 없어 enqueue가 모든 PR을 거절한다. "
+                     "켜려면 그 명령을 줄에 넣는다")
     # check's own rule, so --apply never writes what check then refuses.
     got = new.decode("utf-8").splitlines()
     for name in COMMANDS:
@@ -884,17 +898,38 @@ def gh_api(path, raw=False):
     raw returns file bytes, or None when the file is not there."""
     accept = "application/vnd.github.raw+json" if raw else "application/vnd.github+json"
     result = subprocess.run(["gh", "api", "-H", f"Accept: {accept}", path], capture_output=True)
-    if result.returncode:
-        if raw and b"(HTTP 404)" in result.stderr:
+    code, stdout, stderr = result.returncode, result.stdout, result.stderr
+    if code and b"IP allow list" in stderr:  # e.g. cursor/plugins refuses the Actions token (#175)
+        refused = stderr.strip()
+        code, stdout, stderr = anonymous_api(path, accept)
+        if code:  # keep why the token failed: a private repo answers 404 without one
+            stderr += b"; " + refused
+    if code:
+        if raw and b"(HTTP 404)" in stderr:
             return None
-        raise OSError(f"gh api {path}: {result.stderr.decode('utf-8', 'replace').strip()}")
-    if len(result.stdout) > MAX_READ * 32:
+        raise OSError(f"gh api {path}: {stderr.decode('utf-8', 'replace').strip()}")
+    if len(stdout) > MAX_READ * 32:
         raise OSError(f"gh api {path}: 응답이 너무 크다")
     if raw:
-        if len(result.stdout) > MAX_READ:
+        if len(stdout) > MAX_READ:
             raise OSError(f"{path}: {MAX_READ}바이트를 넘는다")
-        return result.stdout
-    return json.loads(result.stdout)
+        return stdout
+    return json.loads(stdout)
+
+
+def anonymous_api(path, accept):
+    """(code, body, error) of the same REST call without a token. An org's IP allow list refuses tokens
+    from other IPs; its public repos stay readable without one (60 calls an hour, so only as a retry)."""
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    request = Request(f"https://api.github.com/{path}", headers={"Accept": accept, "User-Agent": "repo-baseline"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            return 0, response.read(MAX_READ * 32 + 1), b""
+    except HTTPError as error:
+        return 1, b"", f"토큰 없이: {error.reason} (HTTP {error.code})".encode()
+    except OSError as error:  # URLError: network failure or timeout
+        return 1, b"", f"토큰 없이: {error}".encode()
 
 
 def pages(path, key=None):
@@ -915,7 +950,7 @@ def contents(repo, rel, ref):
     return gh_api(f"repos/{repo}/contents/{quote(rel)}?ref={quote(ref)}", raw=True)
 
 
-def secret_names(paths):
+def env_file_names(paths):
     """(hits, examples): any folder or file name starting with .env is a hit, except .env.example files."""
     hits, examples = set(), set()
     for path in paths:
@@ -1330,7 +1365,7 @@ def preflight(repo, number, remote):
         if len(changed) >= 3000:
             raise OSError(f"커밋 {commit['sha']}의 파일이 REST 한도(3000개)에 닿아 다 볼 수 없다")
         names |= {p for f in changed for p in (f["filename"], f.get("previous_filename")) if p}
-    hits, examples = secret_names(names)
+    hits, examples = env_file_names(names)
     # The contents API follows symlinks, so the bytes alone cannot show a link or a submodule.
     # Both sides count: a PR that turns a link into a file changes what the link used to reach.
     linked = set()
@@ -1343,7 +1378,7 @@ def preflight(repo, number, remote):
                     if q in linked})
     report = {"pr": int(number), "fork": fork, "head": head, "base": base, "branch": pr["head"]["ref"],
               "author": pr["user"]["login"], "base_branch": pr["base"]["ref"],
-              "secret_hits": hits, "unreviewed_examples": examples, "grade": None, "reasons": [],
+              "env_file_hits": hits, "unreviewed_examples": examples, "grade": None, "review_tier": None, "reasons": [],
               "fetch_argv": None, "diff_argv": None}
     if not hits:
         # Grade inputs come from base: the PR cannot list itself out of the sensitive paths.
@@ -1392,6 +1427,7 @@ def preflight(repo, number, remote):
             report["grade"] = "어려움" if reasons else "문서" if all(map(is_doc, paths)) else "쉬움"
             reasons += [f"{name} 예외 아님: {problem}" for name, problem in exceptions]
         report["reasons"] = reasons
+        report["review_tier"] = REVIEW_TIERS[report["grade"]]
         report["fetch_argv"] = ["git", "fetch", "--no-tags", remote, base,
                                 f"+refs/pull/{number}/head:refs/review-preflight/{remote}/pr/{number}"]
         report["diff_argv"] = ["git", "diff", f"{base}...{head}", "--", ".", ":!.env*", ":!**/.env*"]
@@ -1410,7 +1446,7 @@ def cmd_review_preflight(args):
     if report is None:
         print("review-preflight: head나 base가 실행 중에 바뀌었다. 다시 실행한다.", file=sys.stderr)
         return 2
-    code = 1 if report["secret_hits"] else 0
+    code = 1 if report["env_file_hits"] else 0
     if args.json:
         print(json.dumps(report))  # ASCII only, so a non-UTF-8 stdout cannot fail after the checks
         return code
@@ -1420,9 +1456,11 @@ def cmd_review_preflight(args):
     show = lambda paths: ", ".join(p if p.isprintable() else json.dumps(p) for p in paths)  # noqa: E731
     print("미검토(.env.example): " + (show(report["unreviewed_examples"]) or "없음"))
     if code:
-        print("리뷰 미완(비밀값 파일): " + show(report["secret_hits"]))
+        print("리뷰 미완(비밀값 파일): " + show(report["env_file_hits"]))
         return code
     print(f"등급: {report['grade']}")
+    tier = report["review_tier"]
+    print("리뷰 층: " + (f"{tier['model']}·{tier['effort']}" if tier else "없음"))
     for reason in report["reasons"]:
         print(f"이유: {show([reason])}")
     print("fetch: " + shlex.join(report["fetch_argv"]))
@@ -1563,8 +1601,8 @@ def enqueue_problems(repo, number, sha, remote):
     report = preflight(repo, number, remote)
     if report is None:
         return None, ["head나 base가 실행 중에 바뀌었다"]
-    if report["secret_hits"]:
-        return None, ["비밀값 파일 이름: " + ", ".join(json.dumps(p) for p in report["secret_hits"])]
+    if report["env_file_hits"]:
+        return None, ["비밀값 파일 이름: " + ", ".join(json.dumps(p) for p in report["env_file_hits"])]
     owner, name = repo.split("/")
     pr = gh_graphql(PR_QUERY, owner=owner, name=name, number=int(number))["repository"]["pullRequest"]
     problems = [] if report["head"] == sha else [f"head가 {sha}가 아니라 {report['head']}다"]
@@ -1891,7 +1929,7 @@ def skills_bump(root, check, now):
             return 1
         folders = [base + n for base in ("skills/", SKILLS) for update in updates for n in update[3]]
         targets = folders + ["skills/skills.lock.json", "baseline.py", ".baseline/baseline.py", ".baseline/baseline.json",
-                             "core/.claude/settings.json", ".claude/settings.json"]
+                             ".claude/settings.json"]
         links = [rel for rel in targets if linked(root, rel)]
         if links:  # rmtree(ignore_errors) would leave the link and write through it
             raise OSError(f"symlink가 있는 경로에 쓰지 않는다: {', '.join(links)}")
@@ -1938,10 +1976,9 @@ def skills_bump(root, check, now):
                 managed[SKILLS + path.relative_to(root / "skills").as_posix()] = {"sha256": sha256(path.read_bytes())}
     write_managed(root / "baseline.py", managed)
     after = sha256((root / "baseline.py").read_bytes())
-    for rel in ("core/.claude/settings.json", ".claude/settings.json"):  # the enqueue hook pins baseline.py
-        if (root / rel).is_file():
-            data = (root / rel).read_bytes()
-            (root / rel).write_bytes(re.sub(rb'("--sha256",\s*")[0-9a-f]{64}"', b'\\g<1>' + after.encode() + b'"', data))
+    settings = root / ".claude/settings.json"  # the enqueue hook pins baseline.py; core/ keeps its placeholder
+    if settings.is_file():
+        settings.write_bytes(re.sub(rb'("--sha256",\s*")[0-9a-f]{64}"', b'\\g<1>' + after.encode() + b'"', settings.read_bytes()))
     shutil.copyfile(root / "baseline.py", root / ".baseline/baseline.py")
     recorded = json.loads((root / ".baseline/baseline.json").read_bytes())
     (root / ".baseline/baseline.json").write_bytes(dump_json(dict(recorded, managed=managed)))
@@ -2473,8 +2510,7 @@ def cmd_doctor(args):
 # github plan|apply: repository settings and status labels (owner only)
 GITHUB_PROFILE = ".github/repository-settings.json"
 # Common values. A project file holds only its own values (identity, required checks, allowed actions,
-# exceptions) and wins: objects merge by key, lists are replaced whole. test_github.py keeps this equal to
-# the v1 templates/github/repository-settings.json until v1 is deleted.
+# exceptions) and wins: objects merge by key, lists are replaced whole.
 GITHUB_SETTINGS = json.loads(r"""
 {"schema_version": 1, "repository": "REPLACE-OWNER/NAME", "repository_id": 0, "default_branch": "main",
  "expected": {
@@ -3177,8 +3213,12 @@ def ops_problems(root):
         problems += [f"{OPS_PATH}에 있으면 안 된다: {line}" for line in have if line not in want]
         if not problems:
             problems.append(f"{OPS_PATH}: 줄 순서나 빈 줄이 ops/ops.md와 다르다")
-    if not (root / ".env.example").exists() and not linked(root, ".env.example"):
+    try:
+        os.lstat(root / ".env.example")
+    except FileNotFoundError:
         return problems
+    except OSError:
+        pass  # Path.exists() is False when stat is denied (a sandbox on .env.*); read_file below reports it
     try:
         lines = read_file(root, ".env.example").decode("utf-8").splitlines()
     except (OSError, ValueError) as error:
