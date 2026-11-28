@@ -12,12 +12,15 @@ import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -269,6 +272,43 @@ class ConsentScreenTest {
         compose.waitUntil(5_000) { compose.onAllNodes(hasText("저장하지 못했어요. 다시 시도해 주세요.")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText(title).assertDoesNotExist()
         assertTrue(consent.isGranted())
+    }
+
+    private val resultField get() = compose.onNode(hasText("행동 결과 입력") and hasSetTextAction())
+
+    /** 초안이 한 번 저장된 뒤 고친 입력이 저장되지 않은 상태로 목표 목록을 연다. [rejecting]이면 초안 고치기를 막는다. */
+    private fun openGoalsWithUnsavedDraft(rejecting: Boolean) {
+        consent.grant()
+        show(flowWithGoal())
+        waitForText(first.task)
+        resultField.performScrollTo().performTextInput("가")
+        compose.waitUntil(5_000) { count("SELECT COUNT(*) FROM action_note WHERE is_draft AND body = '가'") == 1L }
+        sql("CREATE TRIGGER reject_draft_update BEFORE UPDATE ON action_note BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        resultField.performTextReplacement("가나")
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("입력 다시 저장")).fetchSemanticsNodes().isNotEmpty() }
+        if (!rejecting) sql("DROP TRIGGER reject_draft_update")
+        click("목표 목록")
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("새 목표")).fetchSemanticsNodes().size == 1 }
+    }
+
+    // 철회 전에 보이는 카드의 저장하지 못한 입력을 먼저 저장한다.
+    @Test
+    fun withdrawalSavesTheUnsavedDraftFirst() {
+        openGoalsWithUnsavedDraft(rejecting = false)
+        click("AI 전송 동의 철회")
+        waitForText(title)
+        assertFalse(consent.isGranted())
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE is_draft AND body = '가나'"))
+    }
+
+    // 입력을 저장하지 못해도 철회는 막히지 않는다. 마지막에 저장한 초안이 남는다.
+    @Test
+    fun withdrawalIsNotBlockedWhenTheDraftCannotBeSaved() {
+        openGoalsWithUnsavedDraft(rejecting = true)
+        click("AI 전송 동의 철회")
+        waitForText(title)
+        assertFalse(consent.isGranted())
+        assertEquals(1L, count("SELECT COUNT(*) FROM action_note WHERE is_draft AND body = '가'"))
     }
 
     // 삭제는 확인 대화상자를 거친다. 취소하면 아무것도 지우지 않는다. 확인하면 모두 지우고 결과 문구가 초점을 받는다. 동의는 그대로다.

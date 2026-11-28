@@ -300,12 +300,15 @@ internal fun CoreFlowScreen(
     val cardCommands = remember { Mutex() }
     // iOS `run(saving:)`와 같다. 카드를 바꾸는 명령 전에 저장하지 못한 입력을 먼저 저장하고, 실패하면 명령을 실행하지 않는다.
     // 카드가 바뀐 뒤 도착한 초안 저장은 거부되므로 '완료'·'더 작게'·'되돌리기' 모두 이 경로를 쓴다.
+    val saveCardInput: suspend (Long) -> Unit = { actionId ->
+        val saved = (flow.state.value.screen as? ProgressScreen.CurrentAction)?.card?.takeIf { it.id == actionId }?.draft
+        val input = draftInputs[actionId]
+        if (saved != null && input != null && input != saved) flow.updateDraft(input, actionId)
+    }
     val cardCommand = { actionId: Long, command: suspend () -> Unit ->
         run {
             cardCommands.withLock {
-                val saved = (flow.state.value.screen as? ProgressScreen.CurrentAction)?.card?.takeIf { it.id == actionId }?.draft
-                val input = draftInputs[actionId]
-                if (saved != null && input != null && input != saved) flow.updateDraft(input, actionId)
+                saveCardInput(actionId)
                 command()
             }
         }
@@ -427,13 +430,24 @@ internal fun CoreFlowScreen(
             startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
             privacyPolicyUrl = privacyPolicyUrl,
             uriHandler = uriHandler,
-            // 철회하면 동의 화면으로 돌아간다. 목표를 옮길 때처럼 보이는 카드의 저장하지 못한 입력을 먼저 저장하고, 실패하면 철회하지 않는다.
-            // 동의를 저장하지 못해도 동의를 그대로 두고 저장 실패를 알린다(명령이 예외로 끝나면 실패로 알린다).
+            // 철회하면 동의 화면으로 돌아간다. 보이는 카드의 저장하지 못한 입력은 먼저 저장을 시도하지만, 저장하지 못해도 철회를 막지 않는다.
+            // 동의를 거두는 일이 기기 저장소 오류에 막히면 안 된다(iOS도 조건 없이 철회한다). 동의를 저장하지 못하면 동의를 그대로 두고 저장 실패를 알린다.
             withdraw = consent?.let { value ->
                 {
-                    goalCommand {
-                        check(value.withdraw()) { "동의 철회를 저장하지 못했다" }
-                        showingGoals = false
+                    run {
+                        cardCommands.withLock {
+                            currentCardId?.let { id ->
+                                try {
+                                    saveCardInput(id)
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    // 입력을 저장하지 못한 채 철회한다. 입력란은 사라지고 마지막에 저장한 초안이 남는다.
+                                }
+                            }
+                            check(value.withdraw()) { "동의 철회를 저장하지 못했다" }
+                            showingGoals = false
+                        }
                     }
                 }
             },
