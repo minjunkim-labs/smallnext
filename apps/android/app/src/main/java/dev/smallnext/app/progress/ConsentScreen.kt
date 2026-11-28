@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
@@ -146,10 +147,12 @@ internal fun AIConsentContent(
     }
 }
 
-/** 기기 브라우저로 연다. 열 앱이 없어도 앱이 멈추지 않는다. */
+/**
+ * 기기 브라우저로 연다. 열 앱이 없어도 앱이 멈추지 않는다.
+ * 시트·대화상자는 별도 창이라 창마다 기본 [UriHandler]를 다시 제공하므로, 창 안에서는 바깥에서 얻은 [uriHandler]를 넘긴다.
+ */
 @Composable
-internal fun PrivacyPolicyLink(url: String) {
-    val uriHandler = LocalUriHandler.current
+internal fun PrivacyPolicyLink(url: String, uriHandler: UriHandler = LocalUriHandler.current) {
     TextButton(
         { runCatching { uriHandler.openUri(url) } },
         Modifier.heightIn(min = 48.dp),

@@ -87,6 +87,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -415,6 +416,8 @@ internal fun CoreFlowScreen(
     val goal = state.goal
     // 선택한 목표를 지우면 '목표 보기'를 닫는다. 닫지 않으면 다른 목표를 고를 때 시트가 다시 열린다.
     LaunchedEffect(goal == null) { if (goal == null) showingGoal = false }
+    // 시트는 별도 창이라 안에서 읽은 처리기는 이 화면의 것과 다를 수 있다. 여기서 읽어 넘긴다.
+    val uriHandler = LocalUriHandler.current
     if (showingGoals) {
         GoalListSheet(
             state,
@@ -423,6 +426,7 @@ internal fun CoreFlowScreen(
             select = { id -> goalCommand { flow.selectGoal(id); showingGoals = false } },
             startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
             privacyPolicyUrl = privacyPolicyUrl,
+            uriHandler = uriHandler,
             // 철회하면 동의 화면으로 돌아간다. 저장하지 못하면 동의를 그대로 두고 알린다.
             withdraw = consent?.let { value ->
                 {
@@ -460,6 +464,7 @@ private fun GoalListSheet(
     select: (Long) -> Unit,
     startNew: () -> Unit,
     privacyPolicyUrl: String?,
+    uriHandler: UriHandler,
     withdraw: (() -> Unit)?,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -471,7 +476,7 @@ private fun GoalListSheet(
             CommandButton(R.string.new_goal, onClick = startNew)
             if (state.goals.isEmpty()) Text(stringResource(R.string.no_saved_goals), style = MaterialTheme.typography.bodyLarge)
             for (goal in state.goals) GoalRow(goal, selected = goal.id == state.goal?.id) { select(goal.id) }
-            if (privacyPolicyUrl != null) PrivacyPolicyLink(privacyPolicyUrl)
+            if (privacyPolicyUrl != null) PrivacyPolicyLink(privacyPolicyUrl, uriHandler)
             if (withdraw != null) {
                 DestructiveButton(R.string.ai_consent_withdraw, clickLabel = stringResource(R.string.ai_consent_withdraw_hint), onClick = withdraw)
             }
