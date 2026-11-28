@@ -205,12 +205,23 @@ class ConsentScreenTest {
 
     @Test
     fun withoutConsentGateNothingChangesInTheGoalList() {
-        show(flowWithGoal(), consent = null, url = privacy)
+        // 플래그 OFF는 동의 게이트와 처리방침 주소를 모두 넘기지 않는다(MainActivity).
+        show(flowWithGoal(), consent = null, url = null)
         waitForText(first.task)
         click("목표 목록")
         compose.waitUntil(5_000) { compose.onAllNodes(hasText("새 목표")).fetchSemanticsNodes().size == 1 }
         compose.onNodeWithText("AI 전송 동의 철회").assertDoesNotExist()
-        // 처리방침 링크는 주소가 있으면 동의 게이트와 관계없이 목록에 있다(iOS와 같다).
+        compose.onNodeWithText("개인정보 처리방침").assertDoesNotExist()
+    }
+
+    // 서버 AI가 켜져 있으면 목표 목록에도 처리방침 링크가 있고 기기 브라우저로 연다.
+    @Test
+    fun goalListShowsThePrivacyPolicyLinkWhenServerAIIsOn() {
+        consent.grant()
+        show(flowWithGoal())
+        waitForText(first.task)
+        click("목표 목록")
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("새 목표")).fetchSemanticsNodes().size == 1 }
         click("개인정보 처리방침")
         assertEquals(listOf(privacy), openedLinks)
     }

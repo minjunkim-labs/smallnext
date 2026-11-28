@@ -93,7 +93,7 @@ class AIConsentTest {
     }
 }
 
-/** 메모리에 값을 둔다. [failing]이면 쓰기가 실패한다. */
+/** 메모리에 값을 둔다. [failing]이면 쓰기가 실패한다. 계측 테스트에도 같은 클래스가 있다(소스 세트가 서로 보이지 않는다). */
 class MemoryConsentStore : ConsentStore {
     @Volatile var value = false
     @Volatile var failing = false

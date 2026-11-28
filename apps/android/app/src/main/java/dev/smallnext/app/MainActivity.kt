@@ -40,7 +40,8 @@ class MainActivity : ComponentActivity() {
                 CoreFlowApp(
                     app.progressFlow(flags),
                     consent = app.consent.takeIf { flags.serverAI },
-                    privacyPolicyUrl = ServerAISettings.fromBuildConfig().privacyPolicyUrl.takeIf(ServerAI::privacyPolicy),
+                    // 처리방침 링크도 서버 AI가 켜져 있을 때만 새로 보인다. OFF의 목표 목록은 기존 그대로다.
+                    privacyPolicyUrl = ServerAISettings.fromBuildConfig().privacyPolicyUrl.takeIf { flags.serverAI && ServerAI.privacyPolicy(it) },
                 )
                 return@setContent
             }
