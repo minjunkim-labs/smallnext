@@ -427,13 +427,13 @@ internal fun CoreFlowScreen(
             startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
             privacyPolicyUrl = privacyPolicyUrl,
             uriHandler = uriHandler,
-            // 철회하면 동의 화면으로 돌아간다. 저장하지 못하면 동의를 그대로 두고 알린다.
+            // 철회하면 동의 화면으로 돌아간다. 목표를 옮길 때처럼 보이는 카드의 저장하지 못한 입력을 먼저 저장하고, 실패하면 철회하지 않는다.
+            // 동의를 저장하지 못해도 동의를 그대로 두고 저장 실패를 알린다(명령이 예외로 끝나면 실패로 알린다).
             withdraw = consent?.let { value ->
                 {
-                    if (value.withdraw()) {
+                    goalCommand {
+                        check(value.withdraw()) { "동의 철회를 저장하지 못했다" }
                         showingGoals = false
-                    } else {
-                        storageFailed = true
                     }
                 }
             },
