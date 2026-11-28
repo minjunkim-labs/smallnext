@@ -125,22 +125,3 @@ if (System.getenv("CI") == "true") {
         outputs.cacheIf { false }
     }
 }
-
-// DIAGNOSTIC (remove before merge): print device-test results into the job log, even when the task fails.
-val printAndroidTestResults by tasks.registering {
-    doLast {
-        val dir = layout.buildDirectory.dir("outputs/androidTest-results").get().asFile
-        dir.walkTopDown().filter { it.isFile && it.extension == "xml" }.forEach { file ->
-            println("== RESULT FILE ${file.name}")
-            file.readLines().forEach { line ->
-                val text = line.trim()
-                if (text.startsWith("<testcase") || text.startsWith("<testsuite") || text.startsWith("<failure") ||
-                    text.startsWith("<error") || text.startsWith("at ") || text.startsWith("java.") ||
-                    text.startsWith("kotlin.") || text.startsWith("androidx.") || text.startsWith("org.junit") ||
-                    text.contains("Exception") || text.contains("Error")
-                ) println(text.take(400))
-            }
-        }
-    }
-}
-tasks.matching { it.name == "connectedDebugAndroidTest" }.configureEach { finalizedBy(printAndroidTestResults) }
