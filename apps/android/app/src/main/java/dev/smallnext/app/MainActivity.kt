@@ -24,6 +24,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.smallnext.app.progress.CoreFlowApp
+import dev.smallnext.app.progress.ServerAI
+import dev.smallnext.app.progress.ServerAISettings
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,7 +35,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             if (flags.coreFlow) {
-                CoreFlowApp((application as SmallnextApplication).progressFlow(flags))
+                val app = application as SmallnextApplication
+                // 동의 화면은 서버 AI가 켜져 있을 때만 쓴다. OFF면 기존 흐름 그대로다.
+                CoreFlowApp(
+                    app.progressFlow(flags),
+                    consent = app.consent.takeIf { flags.serverAI },
+                    // 처리방침 링크도 서버 AI가 켜져 있을 때만 새로 보인다. OFF의 목표 목록은 기존 그대로다.
+                    privacyPolicyUrl = ServerAISettings.fromBuildConfig().privacyPolicyUrl.takeIf { flags.serverAI && ServerAI.privacyPolicy(it) },
+                )
                 return@setContent
             }
             var storageFailed by remember { mutableStateOf(false) }

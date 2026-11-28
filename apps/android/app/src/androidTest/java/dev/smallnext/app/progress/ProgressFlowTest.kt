@@ -2211,4 +2211,104 @@ class ProgressFlowTest {
         assertEquals(flow.state.value.screen, makeFlow(UnavailableSuggestionProvider).state.value.screen)
         assertEquals(2, provider.requests.size)
     }
+
+    // AI 전송 동의·기기 기록 전체 삭제(#359)
+
+    /** iOS `testDeleteAllGoalsClearsGoalsRecordsAndDrafts`와 같은 결과다. 목표별 키와 새 목표 입력 키를 모두 지운다. */
+    @Test
+    fun testDeleteAllGoalsClearsGoalsRecordsAndDrafts() = runBlocking {
+        val provider = ScriptedProvider(Action(first), Action(second), Action(third))
+        val flow = makeFlow(provider)
+        startGoal(flow, "첫 번째 목표")
+        flow.awaitSuggestion()
+        flow.complete(flow.card().id)
+        flow.awaitSuggestion()
+        flow.updateDraft("작성 중", flow.card().id)
+        assertEquals(1L, count("SELECT COUNT(*) FROM completion"))
+        startAnotherGoal(flow, "두 번째 목표")
+        flow.awaitSuggestion()
+        assertEquals(2, flow.state.value.goals.size)
+        for (goal in flow.state.value.goals) {
+            for (prefix in listOf("goal_input", "suggestion_input", "supplemental_context")) {
+                probe.execSQL("INSERT OR REPLACE INTO app_metadata (`key`, value) VALUES ('$prefix:${goal.id}', '남은 입력')")
+            }
+        }
+        val requestsBefore = provider.requests.size
+
+        // 확인하지 않은 명령은 아무것도 지우지 않는다.
+        val unconfirmed = failure { flow.deleteAllGoals() }
+        assertEquals(ProgressFlowException.Reason.DELETION_NOT_CONFIRMED, (unconfirmed as ProgressFlowException).reason)
+        assertEquals(2, flow.state.value.goals.size)
+        assertEquals(1L, count("SELECT COUNT(*) FROM completion"))
+
+        flow.deleteAllGoals(confirmed = true)
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertTrue(flow.state.value.goals.isEmpty())
+        assertEquals(GoalInput(), flow.state.value.goalInput)
+        for (table in listOf("goal", "action", "action_note", "completion", "suggestion_request")) {
+            assertEquals(table, 0L, count("SELECT COUNT(*) FROM $table"))
+        }
+        assertEquals(0L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` != 'schema_version'"))
+
+        // 제출하지 않은 새 목표 입력도 지운다.
+        val input = GoalInput(statement = "제출하지 않은 목표")
+        flow.updateGoalInput(input)
+        assertEquals(1L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` = 'goal_input'"))
+        flow.deleteAllGoals(confirmed = true)
+        assertEquals(0L, count("SELECT COUNT(*) FROM app_metadata WHERE `key` != 'schema_version'"))
+        assertEquals(GoalInput(), flow.state.value.goalInput)
+        closeAll()
+        assertEquals(GoalInput(), makeFlow(SuspendedProvider()).state.value.goalInput)
+        assertEquals(requestsBefore, provider.requests.size)
+    }
+
+    /** iOS `testDeleteAllGoalsWhileWaitingCancelsAndIgnoresTheLateResult`. 취소가 공급자 코루틴까지 닿는다. */
+    @Test
+    fun testDeleteAllGoalsWhileWaitingCancelsAndIgnoresTheLateResult() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first)))
+        firstCard(seed)
+        closeAll()
+        val provider = SuspendedProvider()
+        val flow = makeFlow(provider, preparing = false)
+        flow.makeSmaller()
+        awaitRequest(provider.requests)
+        flow.deleteAllGoals(confirmed = true)
+        flow.awaitSuggestion()
+        assertTrue(provider.cancelled)
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertEquals(0L, count("SELECT COUNT(*) FROM action"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request"))
+    }
+
+    /** iOS `testDeleteAllGoalsIgnoresALateSuccess`. 취소를 무시하고 늦게 도착한 성공도 적용하지 않는다. */
+    @Test
+    fun testDeleteAllGoalsIgnoresALateSuccess() = runBlocking {
+        val seed = makeFlow(ScriptedProvider(Action(first)))
+        firstCard(seed)
+        closeAll()
+        val held = HeldProvider(Action(smaller))
+        val flow = makeFlow(held, preparing = false)
+        flow.makeSmaller()
+        awaitRequest(held.requests)
+        flow.deleteAllGoals(confirmed = true)
+        held.release()
+        flow.awaitSuggestion()
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        assertTrue(flow.state.value.goals.isEmpty())
+        assertEquals(0L, count("SELECT COUNT(*) FROM action"))
+        assertEquals(0L, count("SELECT COUNT(*) FROM suggestion_request"))
+    }
+
+    /** 지운 뒤에도 같은 흐름으로 새 목표를 다시 시작할 수 있다(iOS에는 없는 확인). */
+    @Test
+    fun testGoalsCanBeStartedAgainAfterDeletingAll() = runBlocking {
+        val flow = makeFlow(ScriptedProvider(Action(first), Action(second)))
+        firstCard(flow)
+        flow.deleteAllGoals(confirmed = true)
+        assertEquals(ProgressScreen.GoalInput, flow.state.value.screen)
+        startGoal(flow, "다시 시작한 목표")
+        flow.awaitSuggestion()
+        assertEquals(second, flow.card().let { ProposedAction(it.task, it.doneWhen, it.estimatedMinutes) })
+        assertEquals(listOf("다시 시작한 목표"), flow.state.value.goals.map { it.statement })
+    }
 }

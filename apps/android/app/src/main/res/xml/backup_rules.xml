@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 11 이하 자동 백업. 익명 세션(files/auth/)은 이 기기에만 둔다. -->
+<!-- Android 11 이하 자동 백업. 익명 세션(files/auth/)과 AI 전송 동의는 이 기기에만 둔다. -->
 <full-backup-content>
     <exclude domain="file" path="auth/" />
+    <exclude domain="sharedpref" path="smallnext_consent.xml" />
 </full-backup-content>

@@ -21,7 +21,9 @@ class ServerAITest {
     )
     private var creations = 0
 
-    private fun provider(enabled: Boolean, settings: ServerAISettings) = ServerAI.provider(enabled, settings) { url, key ->
+    private val consent = AIConsent(MemoryConsentStore())
+
+    private fun provider(enabled: Boolean, settings: ServerAISettings) = ServerAI.provider(enabled, settings, consent) { url, key ->
         creations += 1
         SupabaseAnonymousIdentity.create(url, key, EmptyStore)
     }
@@ -59,7 +61,7 @@ class ServerAITest {
         assertEquals(0, creations)
         assertNull(provider(false, valid))
         assertEquals(0, creations)
-        assertTrue(provider(true, valid) is ServerSuggestionProvider)
+        assertTrue(provider(true, valid) is ConsentGatedProvider)
         assertEquals(1, creations)
     }
 

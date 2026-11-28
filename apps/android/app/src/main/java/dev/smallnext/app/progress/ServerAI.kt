@@ -28,10 +28,12 @@ object ServerAI {
     /**
      * OFF면 null이다. 호출한 쪽이 빌드별 기본 공급자(Debug 고정, Release `사용 불가`)를 쓴다.
      * 설정이 없거나 잘못되면 [identity]를 부르지 않고 `사용 불가` 공급자를 돌려준다.
+     * 서버 공급자는 [consent]가 요청마다 허락할 때만 보낸다.
      */
     fun provider(
         enabled: Boolean,
         settings: ServerAISettings,
+        consent: AIConsent,
         identity: (projectUrl: String, publishableKey: String) -> SupabaseAnonymousIdentity,
     ): ActionSuggestionProvider? {
         if (!enabled) return null
@@ -44,7 +46,7 @@ object ServerAI {
         if (api == null || project == null || key == null || !privacyPolicy(settings.privacyPolicyUrl) || captcha) {
             return UnavailableSuggestionProvider
         }
-        return ServerSuggestionProvider.create(api, identity(project, key)::idToken)
+        return ConsentGatedProvider(ServerSuggestionProvider.create(api, identity(project, key)::idToken), consent)
     }
 
     /** 사용자 정보가 없는 https 처리방침 주소만 받는다. iOS `AIConsent.privacyPolicyURL`과 같다. */

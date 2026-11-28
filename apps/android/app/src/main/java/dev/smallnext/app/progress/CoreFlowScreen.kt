@@ -87,6 +87,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -137,8 +138,12 @@ internal const val LARGE_FONT_SCALE = 1.5f
 /** iOS의 세로 compact 크기에 대응한다. 가로 화면에서는 고정 막대가 화면을 가린다. */
 private const val COMPACT_HEIGHT = 480
 
+/**
+ * [consent]가 있으면(`android_server_ai` ON) 동의하기 전에는 동의 화면만 보인다. 동의를 철회하면 이 화면으로 돌아온다.
+ * 없으면 기존 흐름 그대로다. [privacyPolicyUrl]은 검사를 마친 https 주소이고 없으면 링크를 보이지 않는다.
+ */
 @Composable
-fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
+fun CoreFlowApp(flow: Deferred<ProgressFlow>, consent: AIConsent? = null, privacyPolicyUrl: String? = null) {
     val opened by produceState<Result<ProgressFlow>?>(null, flow) {
         value = try {
             Result.success(flow.await())
@@ -153,7 +158,7 @@ fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
     SmallnextTheme {
         Surface(Modifier.fillMaxSize()) {
             opened?.fold(
-                onSuccess = { CoreFlowScreen(it) },
+                onSuccess = { ConsentGate(it, consent, privacyPolicyUrl) },
                 onFailure = {
                     Text(
                         stringResource(R.string.storage_error),
@@ -164,6 +169,16 @@ fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
             )
         }
     }
+}
+
+@Composable
+private fun ConsentGate(flow: ProgressFlow, consent: AIConsent?, privacyPolicyUrl: String?) {
+    if (consent == null) {
+        CoreFlowScreen(flow, privacyPolicyUrl = privacyPolicyUrl)
+        return
+    }
+    val granted by consent.state.collectAsState()
+    if (granted) CoreFlowScreen(flow, privacyPolicyUrl = privacyPolicyUrl, consent = consent) else AIConsentScreen(flow, consent, privacyPolicyUrl)
 }
 
 @Composable
@@ -180,7 +195,12 @@ internal fun SmallnextTheme(content: @Composable () -> Unit) {
 /** 진행 흐름의 상태만 그린다. 진행 규칙은 [ProgressFlow]에 있다. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember { animationsRemoved() }) {
+internal fun CoreFlowScreen(
+    flow: ProgressFlow,
+    reduceMotion: Boolean = remember { animationsRemoved() },
+    privacyPolicyUrl: String? = null,
+    consent: AIConsent? = null,
+) {
     val state by flow.state.collectAsState()
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
@@ -280,12 +300,15 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val cardCommands = remember { Mutex() }
     // iOS `run(saving:)`와 같다. 카드를 바꾸는 명령 전에 저장하지 못한 입력을 먼저 저장하고, 실패하면 명령을 실행하지 않는다.
     // 카드가 바뀐 뒤 도착한 초안 저장은 거부되므로 '완료'·'더 작게'·'되돌리기' 모두 이 경로를 쓴다.
+    val saveCardInput: suspend (Long) -> Unit = { actionId ->
+        val saved = (flow.state.value.screen as? ProgressScreen.CurrentAction)?.card?.takeIf { it.id == actionId }?.draft
+        val input = draftInputs[actionId]
+        if (saved != null && input != null && input != saved) flow.updateDraft(input, actionId)
+    }
     val cardCommand = { actionId: Long, command: suspend () -> Unit ->
         run {
             cardCommands.withLock {
-                val saved = (flow.state.value.screen as? ProgressScreen.CurrentAction)?.card?.takeIf { it.id == actionId }?.draft
-                val input = draftInputs[actionId]
-                if (saved != null && input != null && input != saved) flow.updateDraft(input, actionId)
+                saveCardInput(actionId)
                 command()
             }
         }
@@ -396,6 +419,8 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
     val goal = state.goal
     // 선택한 목표를 지우면 '목표 보기'를 닫는다. 닫지 않으면 다른 목표를 고를 때 시트가 다시 열린다.
     LaunchedEffect(goal == null) { if (goal == null) showingGoal = false }
+    // 시트는 별도 창이라 안에서 읽은 처리기는 이 화면의 것과 다를 수 있다. 여기서 읽어 넘긴다.
+    val uriHandler = LocalUriHandler.current
     if (showingGoals) {
         GoalListSheet(
             state,
@@ -403,6 +428,29 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
             onDismiss = { showingGoals = false },
             select = { id -> goalCommand { flow.selectGoal(id); showingGoals = false } },
             startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
+            privacyPolicyUrl = privacyPolicyUrl,
+            uriHandler = uriHandler,
+            // 철회하면 동의 화면으로 돌아간다. 보이는 카드의 저장하지 못한 입력은 먼저 저장을 시도하지만, 저장하지 못해도 철회를 막지 않는다.
+            // 동의를 거두는 일이 기기 저장소 오류에 막히면 안 된다(iOS도 조건 없이 철회한다). 동의를 저장하지 못하면 동의를 그대로 두고 저장 실패를 알린다.
+            withdraw = consent?.let { value ->
+                {
+                    run {
+                        cardCommands.withLock {
+                            currentCardId?.let { id ->
+                                try {
+                                    saveCardInput(id)
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    // 입력을 저장하지 못한 채 철회한다. 입력란은 사라지고 마지막에 저장한 초안이 남는다.
+                                }
+                            }
+                            check(value.withdraw()) { "동의 철회를 저장하지 못했다" }
+                            showingGoals = false
+                        }
+                    }
+                }
+            },
         )
     }
     if (showingGoal && goal != null) {
@@ -429,6 +477,9 @@ private fun GoalListSheet(
     onDismiss: () -> Unit,
     select: (Long) -> Unit,
     startNew: () -> Unit,
+    privacyPolicyUrl: String?,
+    uriHandler: UriHandler,
+    withdraw: (() -> Unit)?,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -439,6 +490,10 @@ private fun GoalListSheet(
             CommandButton(R.string.new_goal, onClick = startNew)
             if (state.goals.isEmpty()) Text(stringResource(R.string.no_saved_goals), style = MaterialTheme.typography.bodyLarge)
             for (goal in state.goals) GoalRow(goal, selected = goal.id == state.goal?.id) { select(goal.id) }
+            if (privacyPolicyUrl != null) PrivacyPolicyLink(privacyPolicyUrl, uriHandler)
+            if (withdraw != null) {
+                DestructiveButton(R.string.ai_consent_withdraw, clickLabel = stringResource(R.string.ai_consent_withdraw_hint), onClick = withdraw)
+            }
             if (storageFailed) StorageFailure()
             CommandButton(R.string.close, prominent = false, onClick = onDismiss)
         }
@@ -1096,7 +1151,7 @@ private fun SuggestionStatus(@StringRes waiting: Int, problem: SuggestionProblem
 }
 
 @Composable
-private fun Heading(@StringRes text: Int, style: androidx.compose.ui.text.TextStyle, modifier: Modifier = Modifier) {
+internal fun Heading(@StringRes text: Int, style: androidx.compose.ui.text.TextStyle, modifier: Modifier = Modifier) {
     Text(stringResource(text), modifier.semantics { heading() }, style = style)
 }
 
@@ -1107,7 +1162,7 @@ private fun StorageFailure() {
 
 /** [label]을 주면 TalkBack은 보이는 글자 대신 [label]을 읽는다. [clickLabel]은 TalkBack이 누를 때 일어날 일로 읽는 동작 레이블이다. */
 @Composable
-private fun CommandButton(
+internal fun CommandButton(
     @StringRes title: Int,
     enabled: Boolean = true,
     prominent: Boolean = true,
