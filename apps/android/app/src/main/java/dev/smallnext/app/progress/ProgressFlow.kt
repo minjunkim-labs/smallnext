@@ -288,6 +288,25 @@ class ProgressFlow private constructor(
         if (deletingSelected) suggestionJob?.cancel()
     }
 
+    /**
+     * 기기의 모든 목표와 그 기록, 제출하지 않은 새 목표 입력과 보충 입력 메타데이터를 한 트랜잭션에서 지운다(iOS `deleteAllGoals`).
+     * AI 전송 동의 없이도 쓸 수 있다. 대기 중인 제안은 취소하고, 이미 지난 요청의 늦은 결과는 적용하지 않는다.
+     * [confirmed]가 아니면 [ProgressFlowException]을 던지고 아무것도 지우지 않는다. 지운 뒤에는 새 목표 입력 화면이다.
+     */
+    suspend fun deleteAllGoals(confirmed: Boolean = false) = serially {
+        if (!confirmed) fail(ProgressFlowException.Reason.DELETION_NOT_CONFIRMED)
+        perform(resetsDismissal = true) { db ->
+            db.update("DELETE FROM goal")
+            // 남는 키는 스키마 버전뿐이다. 목표별 키만이 아니라 새 목표 입력(`goal_input`)과 선택한 목표도 지운다.
+            db.update(
+                "DELETE FROM app_metadata WHERE `key` IN (?, ?) OR `key` LIKE ? OR `key` LIKE ? OR `key` LIKE ?",
+                SELECTED_GOAL_ID, GOAL_INPUT, "$GOAL_INPUT:%", "$SUGGESTION_INPUT:%", "$SUPPLEMENTAL_CONTEXT:%",
+            )
+            null
+        }
+        suggestionJob?.cancel()
+    }
+
     /** 제출하기 전의 입력도 그대로 저장한다. 입력 초안은 확인한 목표가 아니다. */
     suspend fun updateGoalInput(input: GoalInput) = serially { saveGoalInput(input) }
 

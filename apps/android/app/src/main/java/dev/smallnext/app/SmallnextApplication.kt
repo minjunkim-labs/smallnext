@@ -4,9 +4,11 @@ import android.app.Application
 import dev.smallnext.app.auth.KeystoreSessionStore
 import dev.smallnext.app.auth.SupabaseAnonymousIdentity
 import dev.smallnext.app.data.AppDatabase
+import dev.smallnext.app.progress.AIConsent
 import dev.smallnext.app.progress.ProgressFlow
 import dev.smallnext.app.progress.ServerAI
 import dev.smallnext.app.progress.ServerAISettings
+import dev.smallnext.app.progress.SharedPreferencesConsentStore
 import dev.smallnext.app.progress.defaultSuggestionProvider
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +20,9 @@ import kotlinx.coroutines.async
 class SmallnextApplication : Application() {
     val database: AppDatabase by lazy { AppDatabase.open(this) }
 
+    /** AI 전송 동의다. 화면 게이트와 서버 공급자가 같은 값을 쓴다. */
+    val consent: AIConsent by lazy { AIConsent(SharedPreferencesConsentStore(this)) }
+
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var openedFlow: Deferred<ProgressFlow>? = null
@@ -27,7 +32,7 @@ class SmallnextApplication : Application() {
      * 처음 연 실행의 `android_server_ai`로 공급자를 고른다. 메인 스레드에서만 부른다.
      */
     fun progressFlow(flags: FeatureFlags): Deferred<ProgressFlow> = openedFlow ?: appScope.async {
-        val server = ServerAI.provider(flags.serverAI, ServerAISettings.fromBuildConfig()) { url, key ->
+        val server = ServerAI.provider(flags.serverAI, ServerAISettings.fromBuildConfig(), consent) { url, key ->
             val file = File(File(filesDir, KeystoreSessionStore.DIRECTORY), "session")
             SupabaseAnonymousIdentity.create(url, key, KeystoreSessionStore(file))
         }

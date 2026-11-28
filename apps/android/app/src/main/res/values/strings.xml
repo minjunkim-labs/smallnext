@@ -100,6 +100,24 @@
     <string name="delete_goal_title">목표를 삭제할까요?</string>
     <string name="delete_goal_message">‘%1$s’의 행동·결과·입력·완료 기록을 지워요. 삭제 후에는 복구할 수 없어요.</string>
     <string name="delete">삭제</string>
+
+    <!-- AI 전송 동의·철회와 기기 기록 전체 삭제(#359). iOS AIConsentView·CoreFlowView와 같은 문구다. -->
+    <string name="ai_consent_title">AI 제안 전송 동의</string>
+    <string name="ai_consent_sending">작은 행동을 제안하려면 입력한 목표, 완료 조건, 자료 링크·발췌, 행동 기록과 답을 Smallnext 서버를 거쳐 Anthropic(Claude)으로 보냅니다.</string>
+    <string name="ai_consent_anonymous">요청에는 익명 계정이 함께 쓰입니다. 이름이나 연락처는 묻지 않습니다.</string>
+    <string name="ai_consent_required">모든 행동 제안에 AI를 쓰므로 동의해야 시작할 수 있습니다. 동의 전에는 AI로 아무것도 보내지 않습니다. 목표 목록에서 언제든 동의를 철회할 수 있습니다.</string>
+    <string name="privacy_policy">개인정보 처리방침</string>
+    <string name="ai_consent_agree">동의하고 계속</string>
+    <string name="ai_consent_agree_hint">목표와 자료를 Anthropic으로 보내는 데 동의합니다.</string>
+    <string name="ai_consent_withdraw">AI 전송 동의 철회</string>
+    <!-- 계정 삭제(#360)가 들어오면 iOS처럼 동의 화면에서 익명 계정도 지울 수 있다고 안내한다. -->
+    <string name="ai_consent_withdraw_hint">이후 목표와 자료를 AI로 보내지 않습니다. 동의 화면에서 기기의 기록을 삭제할 수 있습니다.</string>
+    <string name="delete_device_data">이 기기의 목표와 기록 삭제</string>
+    <string name="delete_device_data_title">이 기기의 목표와 기록을 삭제할까요?</string>
+    <string name="delete_device_data_message">모든 목표의 행동·결과·입력·완료 기록과 작성 중인 목표를 지워요. 삭제 후에는 복구할 수 없어요.</string>
+    <string name="deleting">삭제하는 중</string>
+    <string name="device_data_deleted">이 기기의 목표와 기록을 삭제했어요.</string>
+    <string name="deletion_failed">삭제하지 못했어요. 다시 시도해 주세요.</string>
     <string name="goal_stopped_notice">진행 상태와 입력·기록을 보관했어요.</string>
     <string name="last_action">마지막 행동</string>
     <string name="input_draft">입력 초안</string>

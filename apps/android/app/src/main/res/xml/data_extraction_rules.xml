@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 12 이상. allowBackup="false"여도 기기 간 이전은 일어난다. 익명 세션(files/auth/)은 둘 다에서 뺀다. -->
+<!-- Android 12 이상. allowBackup="false"여도 기기 간 이전은 일어난다. 익명 세션(files/auth/)과 AI 전송 동의는 둘 다에서 뺀다. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="auth/" />
+        <exclude domain="sharedpref" path="smallnext_consent.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="auth/" />
+        <exclude domain="sharedpref" path="smallnext_consent.xml" />
     </device-transfer>
 </data-extraction-rules>

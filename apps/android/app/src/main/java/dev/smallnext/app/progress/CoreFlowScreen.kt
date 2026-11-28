@@ -137,8 +137,12 @@ internal const val LARGE_FONT_SCALE = 1.5f
 /** iOS의 세로 compact 크기에 대응한다. 가로 화면에서는 고정 막대가 화면을 가린다. */
 private const val COMPACT_HEIGHT = 480
 
+/**
+ * [consent]가 있으면(`android_server_ai` ON) 동의하기 전에는 동의 화면만 보인다. 동의를 철회하면 이 화면으로 돌아온다.
+ * 없으면 기존 흐름 그대로다. [privacyPolicyUrl]은 검사를 마친 https 주소이고 없으면 링크를 보이지 않는다.
+ */
 @Composable
-fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
+fun CoreFlowApp(flow: Deferred<ProgressFlow>, consent: AIConsent? = null, privacyPolicyUrl: String? = null) {
     val opened by produceState<Result<ProgressFlow>?>(null, flow) {
         value = try {
             Result.success(flow.await())
@@ -153,7 +157,7 @@ fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
     SmallnextTheme {
         Surface(Modifier.fillMaxSize()) {
             opened?.fold(
-                onSuccess = { CoreFlowScreen(it) },
+                onSuccess = { ConsentGate(it, consent, privacyPolicyUrl) },
                 onFailure = {
                     Text(
                         stringResource(R.string.storage_error),
@@ -164,6 +168,16 @@ fun CoreFlowApp(flow: Deferred<ProgressFlow>) {
             )
         }
     }
+}
+
+@Composable
+private fun ConsentGate(flow: ProgressFlow, consent: AIConsent?, privacyPolicyUrl: String?) {
+    if (consent == null) {
+        CoreFlowScreen(flow, privacyPolicyUrl = privacyPolicyUrl)
+        return
+    }
+    val granted by consent.state.collectAsState()
+    if (granted) CoreFlowScreen(flow, privacyPolicyUrl = privacyPolicyUrl, consent = consent) else AIConsentScreen(flow, consent, privacyPolicyUrl)
 }
 
 @Composable
@@ -180,7 +194,12 @@ internal fun SmallnextTheme(content: @Composable () -> Unit) {
 /** 진행 흐름의 상태만 그린다. 진행 규칙은 [ProgressFlow]에 있다. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember { animationsRemoved() }) {
+internal fun CoreFlowScreen(
+    flow: ProgressFlow,
+    reduceMotion: Boolean = remember { animationsRemoved() },
+    privacyPolicyUrl: String? = null,
+    consent: AIConsent? = null,
+) {
     val state by flow.state.collectAsState()
     val resources = LocalResources.current
     val scope = rememberCoroutineScope()
@@ -403,6 +422,17 @@ internal fun CoreFlowScreen(flow: ProgressFlow, reduceMotion: Boolean = remember
             onDismiss = { showingGoals = false },
             select = { id -> goalCommand { flow.selectGoal(id); showingGoals = false } },
             startNew = { goalCommand { flow.startNewGoal(); showingGoals = false } },
+            privacyPolicyUrl = privacyPolicyUrl,
+            // 철회하면 동의 화면으로 돌아간다. 저장하지 못하면 동의를 그대로 두고 알린다.
+            withdraw = consent?.let { value ->
+                {
+                    if (value.withdraw()) {
+                        showingGoals = false
+                    } else {
+                        storageFailed = true
+                    }
+                }
+            },
         )
     }
     if (showingGoal && goal != null) {
@@ -429,6 +459,8 @@ private fun GoalListSheet(
     onDismiss: () -> Unit,
     select: (Long) -> Unit,
     startNew: () -> Unit,
+    privacyPolicyUrl: String?,
+    withdraw: (() -> Unit)?,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -439,6 +471,10 @@ private fun GoalListSheet(
             CommandButton(R.string.new_goal, onClick = startNew)
             if (state.goals.isEmpty()) Text(stringResource(R.string.no_saved_goals), style = MaterialTheme.typography.bodyLarge)
             for (goal in state.goals) GoalRow(goal, selected = goal.id == state.goal?.id) { select(goal.id) }
+            if (privacyPolicyUrl != null) PrivacyPolicyLink(privacyPolicyUrl)
+            if (withdraw != null) {
+                DestructiveButton(R.string.ai_consent_withdraw, clickLabel = stringResource(R.string.ai_consent_withdraw_hint), onClick = withdraw)
+            }
             if (storageFailed) StorageFailure()
             CommandButton(R.string.close, prominent = false, onClick = onDismiss)
         }
@@ -1096,7 +1132,7 @@ private fun SuggestionStatus(@StringRes waiting: Int, problem: SuggestionProblem
 }
 
 @Composable
-private fun Heading(@StringRes text: Int, style: androidx.compose.ui.text.TextStyle, modifier: Modifier = Modifier) {
+internal fun Heading(@StringRes text: Int, style: androidx.compose.ui.text.TextStyle, modifier: Modifier = Modifier) {
     Text(stringResource(text), modifier.semantics { heading() }, style = style)
 }
 
@@ -1107,7 +1143,7 @@ private fun StorageFailure() {
 
 /** [label]을 주면 TalkBack은 보이는 글자 대신 [label]을 읽는다. [clickLabel]은 TalkBack이 누를 때 일어날 일로 읽는 동작 레이블이다. */
 @Composable
-private fun CommandButton(
+internal fun CommandButton(
     @StringRes title: Int,
     enabled: Boolean = true,
     prominent: Boolean = true,
