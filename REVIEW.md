@@ -39,7 +39,7 @@
 
 되돌리기 어려움이거나 이 경로를 건드리면 보안 관점의 리뷰를 더한다.
 
-- 공통: `.github/workflows/**`, 저장소·CI 설정(`.github/repository-settings.json`, `.github/dependabot.yml`, `CODEOWNERS`, `.ci/toolchains.json`), 의존성 manifest·lockfile(`Cargo.toml`·`Cargo.lock`, Gradle 파일, `mise.lock`, `skills-lock.json`), 에이전트 설정 폴더(`.claude/`·`.agents/`·`.codex/`·`.cursor/` 같은 폴더와 그 안의 모든 파일, 하위 폴더에 있는 것 포함)와 `.mcp.json`.
+- 공통: `.github/workflows/**`, 저장소·CI 설정(`.github/repository-settings.json`, `.github/dependabot.yml`, `CODEOWNERS`, `.ci/toolchains.json`), 의존성 manifest·lockfile(`Cargo.toml`·`Cargo.lock`, Gradle 파일, `mise.lock`), 에이전트 설정 폴더(`.claude/`·`.agents/`·`.codex/`·`.cursor/` 같은 폴더와 그 안의 모든 파일, 하위 폴더에 있는 것 포함)와 `.mcp.json`.
 - 프로젝트: 인증·익명 계정·AI 예산·동의(`services/api/src/user_ai/**`, `apps/ios/Sources/TurnstileAuthentication.swift`, `apps/ios/Sources/UserServerAI.swift`, `apps/ios/Sources/AIConsent.swift`), DB migration(`services/api/migrations/**`, Android `apps/android/app/src/main/java/dev/smallnext/app/data/AppDatabase.kt`의 `ProgressMigration`), 운영(`infra/production/**`, `scripts/deploy_production.py`, `scripts/prepare_production.py`, `scripts/backup_ai_budget.py`), 독립 집계(`scripts/trusted_ci.py`, `.github/workflows/trusted-aggregation.yml`).
 
 이 경로에서 따로 보는 것:
