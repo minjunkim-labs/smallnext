@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 이하 자동 백업. 익명 세션(files/auth/)은 이 기기에만 둔다. -->
+<full-backup-content>
+    <exclude domain="file" path="auth/" />
+</full-backup-content>

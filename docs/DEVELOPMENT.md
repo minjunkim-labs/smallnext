@@ -7,7 +7,7 @@
 | 대상 | 구성 |
 | --- | --- |
 | iOS | SwiftUI, GRDB 7.11.1, URLSession |
-| Android | Compose, Room 2.8.5, Retrofit 3.0.0, OkHttp 5.5.1 |
+| Android | Compose, Room 2.8.5, Retrofit 3.0.0, OkHttp 5.5.1, supabase-kt Auth 3.9.0, Ktor OkHttp 엔진 3.6.0 |
 | API | Rust 1.99.1, Axum, Tokio, Serde, SQLx, utoipa, tracing |
 | 개발 DB | PostgreSQL 18, Docker Compose |
 | 운영 템플릿 | Caddy, API 컨테이너, 외부 관리형 PostgreSQL |
@@ -272,10 +272,22 @@ Debug 빌드에서만 실행 인텐트 extra로 로컬 확인용 ON을 지정할
 보조 메뉴의 '나중에'는 현재 행동을 보류하고 다른 행동을 받습니다. 받을 행동이 없으면 '보류 중'과 보류 목록이 보입니다. 다른 목표로 옮겨 가지 않습니다. 보류한 행동은 보류 중 화면이나 '목표 보기'에서 '재개'합니다.
 머리의 '목표 목록'에서 저장한 목표를 고르거나 '새 목표'를 시작합니다. 목표를 바꿔도 각 목표의 진행·초안과 작성 중인 새 목표 입력은 남고, 이전 목표의 대기 제안은 중단됩니다. '목표 보기'에서 문구만 고치거나 목표를 중단하고(기록 보관, 더 진행 불가), 확인 대화상자를 거쳐 목표 하나를 삭제합니다. 시스템 뒤로 가기는 대화상자와 시트만 닫습니다.
 제안은 Debug 고정 공급자(`src/debug`)가 만듭니다. Release에는 이 공급자가 없고 제안은 `사용 불가`입니다.
-사용자 서버 `POST /v1/suggestions` 공급자(`ServerSuggestionProvider`)는 iOS와 같은 계약으로 있지만 앱에는 아직 연결하지 않았습니다. `android_server_ai`를 켜도 지금은 동작이 바뀌지 않습니다.
+`android_server_ai`를 켜고 로컬 설정이 유효하면 사용자 서버 `POST /v1/suggestions` 공급자(`ServerSuggestionProvider`)를 씁니다. 토큰은 Supabase 익명 계정의 access token입니다.
+설정이 없거나 잘못되면 익명 계정을 만들지 않고 제안은 `사용 불가`입니다. CAPTCHA 설정이 하나라도 있어도 같습니다. Android에는 CAPTCHA 화면이 없습니다.
+`android_server_ai`가 OFF이면 Debug는 고정 공급자, Release는 `사용 불가`입니다. iOS `user_server_ai` 값과는 무관합니다.
+익명 세션은 Android Keystore 키로 암호화한 `files/auth/session`에 둡니다. 자동 백업과 기기 간 이전에서 제외합니다. 키나 파일을 읽지 못하면 새 계정을 만들지 않고 `사용 불가`입니다.
+로컬 설정은 Git 밖 `~/.gradle/gradle.properties`(또는 `-P`)에 둡니다. 이름과 형식은 [사용자 서버 AI](SERVER_AI.md)의 iOS 설정 표와 같습니다. 설정이 없어도 Debug·Release·CI 빌드는 성공합니다.
+
+```properties
+SMALLNEXT_API_BASE_URL=
+SMALLNEXT_SUPABASE_URL=
+SMALLNEXT_SUPABASE_PUBLISHABLE_KEY=
+SMALLNEXT_PRIVACY_POLICY_URL=
+```
 
 ```sh
 adb shell am start -n dev.smallnext.app/.MainActivity --ez android_core_flow true
+adb shell am start -n dev.smallnext.app/.MainActivity --ez android_core_flow true --ez android_server_ai true
 ```
 
 ## 검사와 계약

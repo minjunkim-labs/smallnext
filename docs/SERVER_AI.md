@@ -163,6 +163,7 @@ Keychain의 세션을 읽지 못하면 삭제를 실패로 알립니다. 계정�
 | `SMALLNEXT_PRIVACY_POLICY_URL` | 사용자 정보가 없는 HTTPS 개인정보 처리방침 페이지; 없으면 서버 AI를 `사용 불가`로 둠 |
 
 선택적인 `SMALLNEXT_FIREBASE_*` 설정은 Crashlytics에만 사용합니다. 인증 설정과 분리합니다.
+Android는 같은 이름을 Git 밖 Gradle 속성으로 받습니다. 설정 방법과 `android_server_ai` 동작은 [개발 환경](DEVELOPMENT.md#android)에 있습니다.
 
 URL 설정의 `https://`는 xcconfig에서 `https:/$()/`로 씁니다.
 xcconfig는 `//` 뒤를 주석으로 처리합니다. `$()`는 빌드 때 빈 문자열로 확장됩니다.

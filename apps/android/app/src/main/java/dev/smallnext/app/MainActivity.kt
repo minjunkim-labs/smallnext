@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             if (flags.coreFlow) {
-                CoreFlowApp((application as SmallnextApplication).progressFlow)
+                CoreFlowApp((application as SmallnextApplication).progressFlow(flags))
                 return@setContent
             }
             var storageFailed by remember { mutableStateOf(false) }

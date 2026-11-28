@@ -55,6 +55,8 @@ Cargo.lock과 `cargo metadata --locked`의 패키지 메타데이터를 확인�
 | Retrofit / Gson converter | 3.0.0 | Apache-2.0. [Retrofit LICENSE](https://github.com/square/retrofit/blob/trunk/LICENSE.txt) |
 | Firebase Crashlytics (BoM) / Crashlytics Gradle 플러그인 | BoM 35.1.0(Crashlytics 21.0.1) / 3.0.8 | Apache-2.0(두 Maven POM 기준). [firebase-android-sdk LICENSE](https://github.com/firebase/firebase-android-sdk/blob/main/LICENSE). 앱은 Crashlytics와 그 전이 의존성만 연결합니다. Analytics는 연결하지 않습니다. |
 | OkHttp | 5.5.1 | Apache-2.0. [OkHttp LICENSE](https://github.com/square/okhttp/blob/parent-5.5.1/LICENSE.txt) |
+| supabase-kt Auth (`auth-kt`) | 3.9.0 | MIT(Maven POM 기준). [supabase-kt LICENSE](https://github.com/supabase-community/supabase-kt/blob/master/LICENSE). Auth 모듈만 연결합니다. Postgrest·Realtime·Storage는 연결하지 않습니다. |
+| Ktor client OkHttp 엔진 | 3.6.0 | Apache-2.0(Maven POM 기준). [Ktor LICENSE](https://github.com/ktorio/ktor/blob/main/LICENSE) |
 | Kotlin | 2.4.21 | Apache-2.0. [Kotlin 라이선스](https://github.com/JetBrains/kotlin/blob/v2.4.21/license/LICENSE.txt) |
 | KSP | 2.3.12 | Apache-2.0. [KSP LICENSE](https://github.com/google/ksp/blob/main/LICENSE) |
 | Android Gradle Plugin | 9.4.1 | Apache-2.0. [Android 빌드 도구 고지](https://android.googlesource.com/platform/tools/base/+/refs/heads/mirror-goog-studio-main/NOTICE) |

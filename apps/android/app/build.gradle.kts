@@ -19,11 +19,15 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // Crashlytics 공개 클라이언트 설정. Git 밖(~/.gradle/gradle.properties 또는 -P)에서만 받는다. 없으면 빈 값이다.
-        for (key in listOf("APP_ID", "SENDER_ID", "PROJECT_ID", "API_KEY")) {
-            val value = providers.gradleProperty("SMALLNEXT_FIREBASE_$key").getOrElse("")
+        // Crashlytics와 서버 AI의 공개 클라이언트 설정. Git 밖(~/.gradle/gradle.properties 또는 -P)에서만 받는다. 없으면 빈 값이다.
+        // 서버 AI 값의 검증은 앱의 `ServerAI`가 한다. CAPTCHA 두 값은 하나라도 있으면 서버 AI를 `사용 불가`로 둔다.
+        val keys = listOf("FIREBASE_APP_ID", "FIREBASE_SENDER_ID", "FIREBASE_PROJECT_ID", "FIREBASE_API_KEY") +
+            listOf("API_BASE_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PRIVACY_POLICY_URL") +
+            listOf("AUTH_CAPTCHA_URL", "TURNSTILE_SITE_KEY")
+        for (key in keys) {
+            val value = providers.gradleProperty("SMALLNEXT_$key").getOrElse("")
             val literal = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
-            buildConfigField("String", "FIREBASE_$key", "\"$literal\"")
+            buildConfigField("String", key, "\"$literal\"")
         }
     }
     buildTypes {
@@ -95,6 +99,9 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.gson)
     implementation(libs.okhttp)
+    // Auth만 쓴다. Postgrest·Realtime·Storage 등 다른 모듈은 넣지 않는다.
+    implementation(libs.supabase.auth)
+    implementation(libs.ktor.client.okhttp)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.crashlytics)
     testImplementation(libs.junit)
