@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
@@ -101,6 +102,12 @@ class ConsentScreenTest {
 
     private fun waitUntilGone(text: String) =
         compose.waitUntil(5_000) { compose.onAllNodes(hasText(text)).fetchSemanticsNodes().isEmpty() }
+
+    /** 알림이 닫힌 뒤 초점이 결과 문구로 옮겨지는 것을 기다린다. */
+    private fun waitUntilFocused(text: String) {
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText(text) and isFocused()).fetchSemanticsNodes().size == 1 }
+        compose.onNodeWithText(text).assertIsFocused()
+    }
 
     private fun assertHeading(text: String) =
         compose.onNodeWithText(text).assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
@@ -284,7 +291,7 @@ class ConsentScreenTest {
         waitForText(dialogTitle)
         tap("삭제")
         waitForText(deleted)
-        compose.onNodeWithText(deleted).assertIsFocused()
+        waitUntilFocused(deleted)
         assertEquals(0L, count("SELECT COUNT(*) FROM goal"))
         assertEquals(0L, count("SELECT COUNT(*) FROM action"))
         assertTrue(flow.state.value.goals.isEmpty())
@@ -321,7 +328,7 @@ class ConsentScreenTest {
         waitForText(dialogTitle)
         tap("삭제")
         waitForText(failed)
-        compose.onNodeWithText(failed).assertIsFocused()
+        waitUntilFocused(failed)
         assertEquals(1L, count("SELECT COUNT(*) FROM goal"))
         compose.onNodeWithText(deleteButton).assertExists()
         sql("DROP TRIGGER block_goal_delete")
@@ -329,7 +336,7 @@ class ConsentScreenTest {
         waitForText(dialogTitle)
         tap("삭제")
         waitForText(deleted)
-        compose.onNodeWithText(deleted).assertIsFocused()
+        waitUntilFocused(deleted)
         assertEquals(0L, count("SELECT COUNT(*) FROM goal"))
     }
 

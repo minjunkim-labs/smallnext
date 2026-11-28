@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -79,8 +80,11 @@ internal fun AIConsentContent(
         messageSerial += 1
     }
     LaunchedEffect(messageSerial) {
-        // 알림이 닫히는 동안의 안내는 TalkBack이 놓칠 수 있어 결과 문구로 초점을 옮긴다.
-        if (messageSerial > 0) messageFocus.requestFocus()
+        // 알림이 닫히는 동안의 안내는 TalkBack이 놓칠 수 있어 결과 문구로 초점을 옮긴다. 알림이 사라진 뒤 한 프레임을 기다려 요청한다.
+        if (messageSerial > 0) {
+            withFrameNanos {}
+            messageFocus.requestFocus()
+        }
     }
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(24.dp),
