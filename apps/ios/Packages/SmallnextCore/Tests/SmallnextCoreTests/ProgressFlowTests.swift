@@ -2510,6 +2510,77 @@ final class ProgressFlowTests: XCTestCase {
         XCTAssertEqual(restored.id, source.id)
     }
 
+    /// #435: 되돌려 보류한 작은 행동을 재개해 완료하면, 원본이 다시 나뉜 동안에도 다음 행동 요청에 원본을 담지 않는다.
+    func testNextActionAfterResumedUndoneSmallActionHasNoSourceContext() async throws {
+        let fourth = ProposedAction(task: "메모 한 줄 덧붙이기", doneWhen: "한 줄이 적혀 있다", estimatedMinutes: 1)
+        let fifth = ProposedAction(task: "메모 날짜 적기", doneWhen: "날짜가 적혀 있다", estimatedMinutes: 1)
+        let provider = ScriptedProvider([.action(first), .action(smaller), .action(third), .action(fourth), .action(fifth)])
+        let flow = try makeFlow(provider)
+        let source = try await firstCard(flow)
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let undone, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        try flow.undoSplit()
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let latest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+
+        // 카드와 요청 맥락이 같은 기준을 쓴다. 되돌려 보류한 작은 행동에는 원본 관계가 없다.
+        try flow.resume(undone.id)
+        guard case .currentAction(let resumed, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertNil(resumed.origin)
+        try flow.complete()
+        await flow.waitForSuggestion()
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할을 완료하면 원본이 맥락에 실린다.
+        try flow.resume(latest.id)
+        guard case .currentAction(let resumedLatest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(resumedLatest.origin?.id, source.id)
+        try flow.complete()
+        await flow.waitForSuggestion()
+
+        let requests = await provider.requests
+        XCTAssertEqual(requests.map(\.kind), [.firstAction, .smaller, .smaller, .nextAction, .nextAction])
+        XCTAssertNil(requests[3].currentAction)
+        XCTAssertEqual(requests[4].currentAction, card(first))
+    }
+
+    /// #435: 되돌려 보류한 작은 행동을 재개해 더 작게 하면, 원본이 다시 나뉜 동안에도 분할 원본 목록에 원본을 담지 않는다.
+    func testSmallerAfterResumedUndoneSmallActionSendsNoSplitSource() async throws {
+        let fourth = ProposedAction(task: "메모 한 줄 덧붙이기", doneWhen: "한 줄이 적혀 있다", estimatedMinutes: 1)
+        let fifth = ProposedAction(task: "메모 날짜 적기", doneWhen: "날짜가 적혀 있다", estimatedMinutes: 1)
+        let provider = ScriptedProvider([.action(first), .action(smaller), .action(third), .action(fourth), .action(fifth)])
+        let flow = try makeFlow(provider)
+        let source = try await firstCard(flow)
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let undone, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        try flow.undoSplit()
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+        guard case .currentAction(let latest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+
+        try flow.resume(undone.id)
+        guard case .currentAction(let resumed, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertNil(resumed.origin)
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+
+        // 되돌리지 않고 보류만 한 가장 최근 분할은 재개한 뒤에도 분할 원본을 담는다.
+        try flow.resume(latest.id)
+        guard case .currentAction(let resumedLatest, nil) = flow.screen else { return XCTFail("\(flow.screen)") }
+        XCTAssertEqual(resumedLatest.origin?.id, source.id)
+        try flow.makeSmaller()
+        await flow.waitForSuggestion()
+
+        let requests = await provider.requests
+        XCTAssertEqual(requests.map(\.kind), [.firstAction, .smaller, .smaller, .smaller, .smaller])
+        XCTAssertEqual(requests[3].currentAction, card(smaller))
+        XCTAssertEqual(requests[3].splitSources, [])
+        XCTAssertEqual(requests[4].currentAction, card(third))
+        XCTAssertEqual(requests[4].splitSources, [first.task])
+    }
+
     func testDraftAutosavesAndSurvivesReopenWithoutBecomingResult() async throws {
         let flow = try makeFlow(ScriptedProvider([.action(first)]))
         let card = try await firstCard(flow)
